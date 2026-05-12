@@ -350,6 +350,34 @@ function buildMessages(
   return messages;
 }
 
+// ── Predefined model presets ───────────────────────────────────────────────
+
+export interface ModelPreset {
+  id: string;
+  label: string;
+  description: string;
+  llmUrl?: string;       // .task for MediaPipe web LLM
+  embedUrl?: string;     // .tflite for LiteRT embedding
+  lmModelPath?: string;  // local path for Tauri desktop/Android
+  embeddingModelPath?: string;
+}
+
+export const MODEL_PRESETS: ModelPreset[] = [
+  {
+    id: "gemma4-bert",
+    label: "Gemma 4 2B + BERT",
+    description: "Gemma 4 E2B (web, ~1.5 GB) + MediaPipe BERT embedder (~25 MB)",
+    llmUrl: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task",
+    embedUrl: "https://storage.googleapis.com/mediapipe-models/text_embedder/bert_embedder/float32/1/bert_embedder.tflite",
+  },
+  {
+    id: "bert-only",
+    label: "BERT embedder only",
+    description: "MediaPipe BERT embedder (~25 MB) — use with API config for LLM",
+    embedUrl: "https://storage.googleapis.com/mediapipe-models/text_embedder/bert_embedder/float32/1/bert_embedder.tflite",
+  },
+];
+
 // ── Web API config persistence ─────────────────────────────────────────────
 
 const WEB_API_KEY_STORAGE = "rag-chatbot:web-api-key";

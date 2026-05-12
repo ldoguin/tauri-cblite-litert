@@ -4,13 +4,13 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { KnowledgePanel } from "./components/KnowledgePanel";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { isTauri } from "./lib/llm";
+import { isTauri, MODEL_PRESETS } from "./lib/llm";
 import type { EmbeddingStatus, RetrievedChunk } from "./lib/rag";
-import type { LlmBackend, ApiConfig, WebLlmOptions } from "./lib/llm";
+import type { LlmBackend, ApiConfig, WebLlmOptions, ModelPreset } from "./lib/llm";
 import "./App.css";
 
 type Modal = "knowledge" | "settings" | null;
-type ToolbarPanel = "none" | "llm" | "api" | "embed";
+type ToolbarPanel = "none" | "presets" | "llm" | "api" | "embed";
 
 // ── Backend status badges ──────────────────────────────────────────────────
 
@@ -41,35 +41,38 @@ function LlmBadge({ backend }: { backend: LlmBackend }) {
 
 function Toolbar({
   embeddingStatus, llmBackend, isWebLlmLoaded,
-  onLoadWebLlm, onUnloadWebLlm, onConfigureApi, onInitEmbedModel,
+  onLoadPreset, onLoadWebLlm, onUnloadWebLlm, onConfigureApi, onInitEmbedModel,
 }: {
   embeddingStatus: EmbeddingStatus | null;
   llmBackend: LlmBackend;
   isWebLlmLoaded: boolean;
+  onLoadPreset: (preset: ModelPreset) => void;
   onLoadWebLlm: (opts: WebLlmOptions) => void;
   onUnloadWebLlm: () => void;
   onConfigureApi: (cfg: ApiConfig) => void;
   onInitEmbedModel: (url: string) => void;
 }) {
   const [panel, setPanel] = useState<ToolbarPanel>("none");
-  const [llmUrl, setLlmUrl]     = useState("");
+  const [llmUrl, setLlmUrl]         = useState("");
   const [llmLoading, setLlmLoading] = useState(false);
-  const [apiUrl, setApiUrl]     = useState("https://api.groq.com/openai/v1");
-  const [apiKey, setApiKey]     = useState("");
-  const [apiModel, setApiModel] = useState("llama-3.1-8b-instant");
-  const [embedUrl, setEmbedUrl] = useState("");
+  const [apiUrl, setApiUrl]         = useState("https://api.groq.com/openai/v1");
+  const [apiKey, setApiKey]         = useState("");
+  const [apiModel, setApiModel]     = useState("llama-3.1-8b-instant");
+  const [embedUrl, setEmbedUrl]     = useState("");
+  const [loadingPresetId, setLoadingPresetId] = useState<string | null>(null);
 
   const handleLoadLlm = async () => {
     if (!llmUrl.trim()) return;
     setLlmLoading(true);
-    try {
-      await onLoadWebLlm({ modelUrl: llmUrl.trim() });
-      setPanel("none");
-    } catch (e) {
-      alert("Failed to load LLM: " + String(e));
-    } finally {
-      setLlmLoading(false);
-    }
+    try { await onLoadWebLlm({ modelUrl: llmUrl.trim() }); setPanel("none"); }
+    catch (e) { alert("Failed to load LLM: " + String(e)); }
+    finally { setLlmLoading(false); }
+  };
+
+  const handleLoadPreset = async (preset: ModelPreset) => {
+    setLoadingPresetId(preset.id);
+    try { await onLoadPreset(preset); setPanel("none"); }
+    finally { setLoadingPresetId(null); }
   };
 
   return (
@@ -80,10 +83,52 @@ function Toolbar({
       </div>
 
       <div className="toolbar-right">
+
+        {/* ── Presets panel ── */}
+        {panel === "presets" && (
+          <div className="preset-panel">
+            <div className="preset-panel-header">
+              <span>Quick load</span>
+              <button className="icon-btn" onClick={() => setPanel("none")}>✕</button>
+            </div>
+            {MODEL_PRESETS.map((preset) => {
+              const loading = loadingPresetId === preset.id;
+              return (
+                <div key={preset.id} className="preset-row">
+                  <div className="preset-info">
+                    <span className="preset-label">{preset.label}</span>
+                    <span className="preset-desc">{preset.description}</span>
+                    <div className="preset-urls">
+                      {preset.llmUrl && (
+                        <span className="preset-url" title={preset.llmUrl}>
+                          🤖 {preset.llmUrl.split("/").pop()}
+                        </span>
+                      )}
+                      {preset.embedUrl && (
+                        <span className="preset-url" title={preset.embedUrl}>
+                          🔢 {preset.embedUrl.split("/").pop()}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <button
+                    className="btn-sm"
+                    onClick={() => handleLoadPreset(preset)}
+                    disabled={loading || loadingPresetId !== null}
+                  >
+                    {loading ? "Loading…" : "Load"}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── Custom LLM panel ── */}
         {panel === "llm" && (
           <div className="toolbar-panel-row">
             <input className="toolbar-input" style={{ width: 340 }}
-              placeholder="https://…/gemma3-1b-it-int4-web.task"
+              placeholder="https://…/model.task"
               value={llmUrl} onChange={(e) => setLlmUrl(e.target.value)} />
             <button className="btn-sm" onClick={handleLoadLlm} disabled={llmLoading}>
               {llmLoading ? "Loading…" : "Load"}
@@ -91,6 +136,8 @@ function Toolbar({
             <button className="btn-sm secondary" onClick={() => setPanel("none")}>✕</button>
           </div>
         )}
+
+        {/* ── API config panel ── */}
         {panel === "api" && (
           <div className="toolbar-panel-row">
             <input className="toolbar-input" placeholder="API base URL" style={{ width: 190 }}
@@ -108,6 +155,8 @@ function Toolbar({
             <button className="btn-sm secondary" onClick={() => setPanel("none")}>✕</button>
           </div>
         )}
+
+        {/* ── Custom embed panel ── */}
         {panel === "embed" && (
           <div className="toolbar-panel-row">
             <input className="toolbar-input" placeholder="https://…/model.tflite"
@@ -118,9 +167,13 @@ function Toolbar({
             <button className="btn-sm secondary" onClick={() => setPanel("none")}>✕</button>
           </div>
         )}
+
+        {/* ── Default buttons ── */}
         {panel === "none" && (
           <>
-            {/* Web-only LLM controls */}
+            <button className="btn-sm preset-btn" onClick={() => setPanel("presets")}>
+              ⚡ Quick load
+            </button>
             {!isTauri() && (
               isWebLlmLoaded
                 ? <button className="btn-sm danger" onClick={onUnloadWebLlm}>Unload LLM</button>
@@ -197,6 +250,7 @@ export default function App() {
           embeddingStatus={chat.embeddingStatus}
           llmBackend={chat.llmBackend}
           isWebLlmLoaded={chat.llmBackend === "mediapipe"}
+          onLoadPreset={chat.loadPreset}
           onLoadWebLlm={chat.loadWebLlmModel}
           onUnloadWebLlm={chat.unloadWebLlmModel}
           onConfigureApi={chat.configureApi}

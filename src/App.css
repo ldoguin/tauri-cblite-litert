@@ -202,6 +202,7 @@ body { background: var(--bg); height: 100dvh; overflow: hidden; }
   gap: 10px;
   flex-wrap: wrap;
   min-height: 42px;
+  position: relative;
 }
 
 .toolbar-left  { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
@@ -258,6 +259,90 @@ body { background: var(--bg); height: 100dvh; overflow: hidden; }
 .btn-sm.secondary { color: var(--text-2); }
 .btn-sm.danger { border-color: #7f2020; color: var(--error); }
 .btn-sm.danger:hover { background: #3b1515; }
+
+/* ── Preset panel ───────────────────────────────────────────────────────── */
+
+.preset-btn {
+  background: linear-gradient(135deg, #1a2e4a, #22263a);
+  border-color: var(--accent);
+  color: var(--accent);
+  font-weight: 600;
+}
+.preset-btn:hover { background: #1e3560; }
+
+.preset-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  width: 480px;
+  max-width: calc(100vw - 32px);
+  box-shadow: 0 8px 32px rgba(0,0,0,.45);
+  z-index: 200;
+  overflow: hidden;
+}
+
+.preset-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px 10px;
+  border-bottom: 1px solid var(--border);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: .06em;
+}
+
+.preset-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  transition: background .15s;
+}
+.preset-row:last-child { border-bottom: none; }
+.preset-row:hover { background: var(--bg-3); }
+
+.preset-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.preset-label {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.preset-desc {
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.preset-urls {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.preset-url {
+  font-size: 11px;
+  color: var(--accent);
+  opacity: .75;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
 
 /* ── RAG debug panel ────────────────────────────────────────────────────── */
 

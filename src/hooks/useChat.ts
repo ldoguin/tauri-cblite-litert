@@ -53,6 +53,7 @@ import {
   type LlmBackend,
   type ApiConfig,
   type WebLlmOptions,
+  type ModelPreset,
 } from "../lib/llm";
 import type {
   Conversation,
@@ -147,6 +148,30 @@ export function useChat() {
       setStatus("ready");
     }
     setLlmBackend(getActiveBackend());
+  }, []);
+
+  // ── Preset loader ────────────────────────────────────────────────────────
+
+  const loadPreset = useCallback(async (preset: ModelPreset) => {
+    setStatus("loading-models");
+    setError(null);
+    try {
+      // Load embedding model first (smaller, faster)
+      if (preset.embedUrl && !isTauri()) {
+        const embStatus = await initEmbeddings(preset.embedUrl);
+        setEmbeddingStatus(embStatus);
+        setEmbeddingBackend(getEmbeddingBackend());
+      }
+      // Load web LLM
+      if (preset.llmUrl && !isTauri()) {
+        await loadWebLlm({ modelUrl: preset.llmUrl });
+        setLlmBackend(getActiveBackend());
+      }
+      setStatus("ready");
+    } catch (err) {
+      setError(String(err));
+      setStatus("error");
+    }
   }, []);
 
   // ── Web LLM (MediaPipe) ──────────────────────────────────────────────────
@@ -431,6 +456,7 @@ export function useChat() {
     streamingContent, lastRagChunks,
     embeddingStatus, embeddingBackend, llmBackend,
     updateConfig,
+    loadPreset,
     loadWebLlmModel, unloadWebLlmModel,
     configureApi, initEmbeddingEngine,
     createConversation, selectConversation, renameConversation, removeConversation,
