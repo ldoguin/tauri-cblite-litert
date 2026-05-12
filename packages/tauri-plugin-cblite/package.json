@@ -1,0 +1,33 @@
+{
+  "name": "tauri-plugin-cblite",
+  "version": "0.1.0",
+  "description": "TypeScript API for tauri-plugin-cblite",
+  "main": "index.js",
+  "module": "index.js",
+  "types": "index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "tauri",
+    "couchbase",
+    "couchbase lite",
+    "sql",
+    "json"
+  ],
+  "author": "",
+  "license": "MIT",
+  "peerDependencies": {
+    "@tauri-apps/api": "^2.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/api": "^2.0.0",
+    "typescript": "^5.0.0"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "README.md"
+  ]
+}

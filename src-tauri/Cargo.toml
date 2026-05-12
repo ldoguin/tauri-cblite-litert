@@ -1,0 +1,32 @@
+[package]
+name = "tauri-cblite-litert"
+version = "0.1.0"
+description = "Offline RAG chatbot — LiteRT inference + CouchbaseLite storage"
+authors = []
+edition = "2021"
+
+[lib]
+name = "tauri_cblite_litert_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "tauri-cblite-litert"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "135ccc2", features = ["native-cbl"] }
+tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "s"   # optimise for binary size
+strip = true
+lto = true
+codegen-units = 1
+panic = "abort"

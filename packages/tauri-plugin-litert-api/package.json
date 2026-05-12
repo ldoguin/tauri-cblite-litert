@@ -1,0 +1,22 @@
+{
+  "name": "tauri-plugin-litert-api",
+  "version": "0.1.0",
+  "description": "JavaScript/TypeScript bindings for tauri-plugin-litert",
+  "license": "Apache-2.0",
+  "main": "./dist/index.js",
+  "module": "./dist/index.mjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2"
+  },
+  "optionalDependencies": {
+    "@litertjs/core": "^2.5.0"
+  }
+}
