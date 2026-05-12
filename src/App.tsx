@@ -149,7 +149,7 @@ function Toolbar({
           </div>
         )}
 
-        {/* ── API config panel ── */}
+        {/* ── Cloud LLM fallback panel (web only, no WebGPU) ── */}
         {panel === "api" && (
           <div className="toolbar-panel-row">
             <input className="toolbar-input" placeholder="API base URL" style={{ width: 190 }}
@@ -191,7 +191,9 @@ function Toolbar({
                 ? <button className="btn-sm danger" onClick={onUnloadWebLlm}>Unload LLM</button>
                 : <button className="btn-sm secondary" onClick={() => setPanel("llm")}>Load LLM</button>
             )}
-            <button className="btn-sm secondary" onClick={() => setPanel("api")}>API config</button>
+            {!isTauri() && (
+              <button className="btn-sm secondary" onClick={() => setPanel("api")} title="Cloud LLM fallback for browsers without WebGPU">Cloud LLM fallback</button>
+            )}
             {!isTauri() && (
               <button className="btn-sm secondary" onClick={() => setPanel("embed")}>Embed model</button>
             )}
