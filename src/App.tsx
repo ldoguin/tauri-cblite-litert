@@ -5,7 +5,7 @@ import { ChatPane } from "./components/ChatPane";
 import { KnowledgePanel } from "./components/KnowledgePanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { isTauri } from "./lib/llm";
-import type { EmbeddingStatus } from "./lib/rag";
+import type { EmbeddingStatus, RetrievedChunk } from "./lib/rag";
 import type { LlmBackend, ApiConfig, WebLlmOptions } from "./lib/llm";
 import "./App.css";
 
@@ -139,11 +139,7 @@ function Toolbar({
 
 // ── RAG debug panel ────────────────────────────────────────────────────────
 
-function RagDebugPanel({
-  chunks,
-}: {
-  chunks: Array<{ text: string; source: string; score: number }>;
-}) {
+function RagDebugPanel({ chunks }: { chunks: RetrievedChunk[] }) {
   if (chunks.length === 0) return null;
   return (
     <div className="rag-debug">
@@ -151,6 +147,7 @@ function RagDebugPanel({
       {chunks.map((c, i) => (
         <div key={i} className="rag-debug-chunk">
           <span className="rag-score">{c.score.toFixed(3)}</span>
+          <span className={`rag-type-badge rag-type-${c.type}`}>{c.type}</span>
           <span className="rag-source">{c.source}</span>
           <span className="rag-text">
             {c.text.slice(0, 120)}{c.text.length > 120 ? "…" : ""}

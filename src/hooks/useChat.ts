@@ -37,6 +37,7 @@ import {
   splitIntoChunks,
   type EmbeddingStatus,
   type EmbeddingBackend,
+  type RetrievedChunk,
 } from "../lib/rag";
 import {
   loadModels,
@@ -84,9 +85,7 @@ export function useChat() {
   const [llmBackend, setLlmBackend] = useState<LlmBackend>("mock");
 
   // RAG debug: last retrieved chunks shown in the UI
-  const [lastRagChunks, setLastRagChunks] = useState<
-    Array<{ text: string; source: string; score: number }>
-  >([]);
+  const [lastRagChunks, setLastRagChunks] = useState<RetrievedChunk[]>([]);
 
   const modelsLoaded = useRef(false);
 
@@ -216,17 +215,49 @@ export function useChat() {
     if (activeConvId === id) { setActiveConvId(null); setMessages([]); }
   }, [activeConvId]);
 
-  // ── Embed a message and save its vector back to CouchbaseLite ────────────
+  // ── Embed a message and save its vector(s) back to CouchbaseLite ─────────
+  //
+  // Short messages (< CHUNK_SIZE chars) are embedded as a single document.
+  // Long messages are split into overlapping chunks; each chunk is saved as
+  // a separate message document so the vector index stays fine-grained.
+  // The original message document gets the embedding of its first chunk so
+  // it remains retrievable even without loading all chunks.
 
   const embedAndSave = useCallback(async (msg: Message) => {
     try {
-      const vec = await embed(
-        msg.content,
-        modelsLoaded.current ? EMBED_MODEL_ID : undefined,
-      );
-      const updated: Message = { ...msg, embedding: vec };
-      await saveMessage(updated);
-      setMessages((prev) => prev.map((m) => (m.id === msg.id ? updated : m)));
+      const modelId = modelsLoaded.current ? EMBED_MODEL_ID : undefined;
+      const chunks = splitIntoChunks(msg.content);
+
+      if (chunks.length <= 1) {
+        // Single chunk — embed in-place on the original message document
+        const vec = await embed(msg.content, modelId);
+        const updated: Message = { ...msg, embedding: vec };
+        await saveMessage(updated);
+        setMessages((prev) => prev.map((m) => (m.id === msg.id ? updated : m)));
+        return;
+      }
+
+      // Multiple chunks — embed each and save as child message documents
+      for (let i = 0; i < chunks.length; i++) {
+        const vec = await embed(chunks[i], modelId);
+        if (i === 0) {
+          // Update the original message with the first chunk's embedding
+          const updated: Message = { ...msg, embedding: vec };
+          await saveMessage(updated);
+          setMessages((prev) => prev.map((m) => (m.id === msg.id ? updated : m)));
+        } else {
+          // Save additional chunks as sibling documents
+          const chunkMsg: Message = {
+            id: `${msg.id}-chunk-${i}`,
+            conversationId: msg.conversationId,
+            role: msg.role,
+            content: chunks[i],
+            createdAt: msg.createdAt,
+            embedding: vec,
+          };
+          await saveMessage(chunkMsg);
+        }
+      }
     } catch (e) {
       console.warn("[useChat] embed failed:", e);
     }
@@ -283,16 +314,10 @@ export function useChat() {
         userVec,
         config.ragTopK,
         0.3,
-        convId, // exclude current conversation's own chunks
+        convId, // exclude current conversation's own messages
       );
-      ragSourceIds = retrieved.map((r) => r.chunk.id);
-      setLastRagChunks(
-        retrieved.map(({ chunk, score }) => ({
-          text: chunk.text,
-          source: chunk.source,
-          score,
-        })),
-      );
+      ragSourceIds = retrieved.map((r) => r.id);
+      setLastRagChunks(retrieved);
       if (retrieved.length > 0) {
         ragContext = buildRagPrompt("", retrieved, "").split("User:")[0].trim();
       }

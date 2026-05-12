@@ -12,9 +12,9 @@
  *   - Can exclude chunks from a specific conversation (cross-conversation RAG)
  */
 
-import { createEmbedding } from "tauri-plugin-litert-api";
-import { listKnowledgeChunks } from "./db";
-import type { KnowledgeChunk } from "./types";
+import { runInference } from "tauri-plugin-litert-api";
+import { listKnowledgeChunks, listEmbeddedMessages } from "./db";
+
 
 // ── Embedding backend state ────────────────────────────────────────────────
 
@@ -32,6 +32,7 @@ type UseModel = {
 let activeBackend: EmbeddingBackend = "bow";
 let useModel: UseModel | null = null;
 let initPromise: Promise<EmbeddingStatus> | null = null;
+let liteRtLoaded = false; // guard against calling loadLiteRt() more than once
 
 // ── Initialisation ─────────────────────────────────────────────────────────
 
@@ -43,7 +44,8 @@ let initPromise: Promise<EmbeddingStatus> | null = null;
  * Call once at app startup. Re-call with a new URL to switch models.
  */
 export function initEmbeddings(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
-  if (initPromise && !(liteRtModelUrl && activeBackend !== "litert")) return initPromise;
+  // Re-init only when a new model URL is explicitly provided
+  if (initPromise && !liteRtModelUrl) return initPromise;
   initPromise = _init(liteRtModelUrl);
   return initPromise;
 }
@@ -59,7 +61,10 @@ async function _init(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
   if (liteRtModelUrl) {
     try {
       const { loadLiteRt, loadAndCompile } = await import("@litertjs/core");
-      await loadLiteRt("https://cdn.jsdelivr.net/npm/@litertjs/core/wasm/");
+      if (!liteRtLoaded) {
+        await loadLiteRt("https://cdn.jsdelivr.net/npm/@litertjs/core/wasm/");
+        liteRtLoaded = true;
+      }
       await loadAndCompile(liteRtModelUrl, { accelerator: "wasm" });
       activeBackend = "litert";
       return { backend: "litert", modelUrl: liteRtModelUrl };
@@ -111,9 +116,14 @@ export async function embed(
 }
 
 async function embedWithLiteRtPlugin(text: string, modelId: string): Promise<number[]> {
-  const tokens = tokenise(text);
-  const { embedding } = await createEmbedding({ modelId, input: tokens });
-  return l2Normalise(embedding);
+  const { input_word_ids, input_mask, input_type_ids } = tokeniseBert(text);
+  // runInference accepts one flat array per input tensor — BERT needs three.
+  const { outputs } = await runInference({
+    modelId,
+    inputs: [input_word_ids, input_mask, input_type_ids],
+  });
+  // First output tensor is the embedding vector
+  return l2Normalise(outputs[0] ?? []);
 }
 
 async function embedWithUse(text: string): Promise<number[]> {
@@ -122,23 +132,51 @@ async function embedWithUse(text: string): Promise<number[]> {
   return l2Normalise(embeddings.arraySync()[0]);
 }
 
-// ── Tokeniser (djb2 hash, matches plugin example) ──────────────────────────
+// ── Tokeniser ──────────────────────────────────────────────────────────────
+
+const SEQ_LEN = 128;
 
 /**
- * Maps text → int32[seqLen] token IDs using a djb2 character hash.
- * For production, replace with a BPE/WordPiece tokeniser matching your model.
+ * Produces the three int32 input arrays expected by BERT-family .tflite
+ * embedding models (e.g. MediaPipe bert_embedder):
+ *   input_word_ids  — djb2-hashed token IDs, [CLS] prepended, [SEP] appended
+ *   input_mask      — 1 for real tokens, 0 for padding
+ *   input_type_ids  — all zeros (single-segment)
+ *
+ * djb2 hashing matches the plugin example's tokeniser. For production,
+ * replace with a proper WordPiece tokeniser matching the model's vocabulary.
  */
-function tokenise(text: string, seqLen = 128): number[] {
-  const tokens = new Array<number>(seqLen).fill(0);
-  const words = text.toLowerCase().split(/\s+/).slice(0, seqLen);
-  for (let i = 0; i < words.length; i++) {
+function tokeniseBert(text: string): {
+  input_word_ids: number[];
+  input_mask: number[];
+  input_type_ids: number[];
+} {
+  const CLS = 101, SEP = 102, PAD = 0;
+  const words = text.toLowerCase().split(/\s+/).slice(0, SEQ_LEN - 2);
+
+  const ids: number[] = [CLS];
+  for (const w of words) {
     let h = 5381;
-    for (let j = 0; j < words[i].length; j++)
-      h = ((h << 5) + h) ^ words[i].charCodeAt(j);
-    tokens[i] = Math.abs(h) % 30000;
+    for (let i = 0; i < w.length; i++) h = ((h << 5) + h) ^ w.charCodeAt(i);
+    ids.push((Math.abs(h) % 29998) + 1); // keep away from 0/CLS/SEP
   }
-  return tokens;
+  ids.push(SEP);
+
+  const mask = new Array<number>(SEQ_LEN).fill(0);
+  const wordIds = new Array<number>(SEQ_LEN).fill(PAD);
+  for (let i = 0; i < ids.length && i < SEQ_LEN; i++) {
+    wordIds[i] = ids[i];
+    mask[i] = 1;
+  }
+
+  return {
+    input_word_ids: wordIds,
+    input_mask: mask,
+    input_type_ids: new Array<number>(SEQ_LEN).fill(0),
+  };
 }
+
+
 
 // ── Bag-of-Words fallback ──────────────────────────────────────────────────
 
@@ -197,18 +235,32 @@ export function splitIntoChunks(text: string): string[] {
 
 // ── Retrieval ──────────────────────────────────────────────────────────────
 
+// ── Retrieval ──────────────────────────────────────────────────────────────
+
+export type RetrievedItemType = "knowledge" | "message";
+
 export interface RetrievedChunk {
-  chunk: KnowledgeChunk;
+  /** Unique ID of the source document */
+  id: string;
+  /** Display label: filename for knowledge chunks, role+timestamp for messages */
+  source: string;
+  text: string;
   score: number;
+  type: RetrievedItemType;
+  /** Conversation the message belongs to, if type === "message" */
+  conversationId?: string;
 }
 
 /**
- * Retrieves the top-K knowledge chunks most similar to `queryEmbedding`.
+ * Retrieves the top-K items most similar to `queryEmbedding` from both:
+ *   - _default.knowledge  (ingested document chunks)
+ *   - _default.messages   (vectorised conversation turns)
  *
  * @param queryEmbedding         Embedding of the user query
- * @param topK                   Maximum number of chunks to return
+ * @param topK                   Maximum number of results to return
  * @param threshold              Minimum cosine similarity (default 0.3)
- * @param excludeConversationId  Skip chunks whose source matches this ID
+ * @param excludeConversationId  Skip messages from this conversation (avoids
+ *                               the current conversation retrieving itself)
  */
 export async function retrieveTopK(
   queryEmbedding: number[],
@@ -216,17 +268,39 @@ export async function retrieveTopK(
   threshold = 0.3,
   excludeConversationId?: string,
 ): Promise<RetrievedChunk[]> {
-  const chunks = await listKnowledgeChunks();
-  if (chunks.length === 0) return [];
+  const [chunks, messages] = await Promise.all([
+    listKnowledgeChunks(),
+    listEmbeddedMessages(),
+  ]);
 
-  return chunks
-    .filter((c) => {
-      if (!c.embedding || c.embedding.length === 0) return false;
-      if (excludeConversationId && c.source === excludeConversationId) return false;
-      return true;
-    })
-    .map((chunk) => ({ chunk, score: cosineSimilarity(queryEmbedding, chunk.embedding) }))
-    .filter(({ score }) => score >= threshold)
+  const candidates: RetrievedChunk[] = [];
+
+  // Knowledge chunks
+  for (const c of chunks) {
+    if (!c.embedding?.length) continue;
+    const score = cosineSimilarity(queryEmbedding, c.embedding);
+    if (score < threshold) continue;
+    candidates.push({ id: c.id, source: c.source, text: c.text, score, type: "knowledge" });
+  }
+
+  // Vectorised messages (exclude current conversation)
+  for (const m of messages) {
+    if (!m.embedding?.length) continue;
+    if (excludeConversationId && m.conversationId === excludeConversationId) continue;
+    const score = cosineSimilarity(queryEmbedding, m.embedding);
+    if (score < threshold) continue;
+    const label = `${m.role} · ${new Date(m.createdAt).toLocaleDateString()}`;
+    candidates.push({
+      id: m.id,
+      source: label,
+      text: m.content,
+      score,
+      type: "message",
+      conversationId: m.conversationId,
+    });
+  }
+
+  return candidates
     .sort((a, b) => b.score - a.score)
     .slice(0, topK);
 }
@@ -235,16 +309,16 @@ export async function retrieveTopK(
 
 export function buildRagPrompt(
   query: string,
-  retrievedChunks: RetrievedChunk[],
+  retrieved: RetrievedChunk[],
   systemInstruction: string,
 ): string {
   const contextBlock =
-    retrievedChunks.length > 0
+    retrieved.length > 0
       ? [
           "--- Retrieved context ---",
-          ...retrievedChunks.map(
-            ({ chunk, score }, i) =>
-              `[${i + 1}] (source: ${chunk.source}, score: ${score.toFixed(3)})\n${chunk.text}`,
+          ...retrieved.map(
+            ({ source, text, score, type }, i) =>
+              `[${i + 1}] (${type}: ${source}, score: ${score.toFixed(3)})\n${text}`,
           ),
           "--- End of context ---",
           "",

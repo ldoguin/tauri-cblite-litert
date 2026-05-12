@@ -68,13 +68,18 @@ huggingface-cli download litert-community/Gemma3-1B-IT-int4 \
   --include "*.litertlm" --local-dir models/
 ```
 
-**Embedding model** — any sentence-embedding `.tflite`:
+**Embedding model** — MediaPipe BERT embedder (int32 input tensors, works in browser and on-device):
 
 ```bash
-# Example: MobileBERT from Kaggle (small, fast)
-# Download manually from https://www.kaggle.com/models/google/mobilebert/tfLite
-# and place at models/mobilebert.tflite
+# Web: paste this URL into "Embed model" in the toolbar
+# https://storage.googleapis.com/mediapipe-models/text_embedder/bert_embedder/float32/1/bert_embedder.tflite
+
+# Desktop / Android: download locally
+curl -L -o models/bert_embedder.tflite \
+  "https://storage.googleapis.com/mediapipe-models/text_embedder/bert_embedder/float32/1/bert_embedder.tflite"
 ```
+
+> The Universal Sentence Encoder `.tflite` uses STRING input tensors which LiteRT Wasm does not support. Use the BERT embedder above instead.
 
 ### 3. Configure
 

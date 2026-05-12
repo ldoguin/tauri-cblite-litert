@@ -300,7 +300,10 @@ body { background: var(--bg); height: 100dvh; overflow: hidden; }
 }
 
 .rag-score  { color: var(--accent); font-weight: 600; flex-shrink: 0; min-width: 42px; }
-.rag-source { color: var(--text-2); flex-shrink: 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rag-type-badge { font-size: 10px; padding: 1px 6px; border-radius: 10px; flex-shrink: 0; font-weight: 600; }
+.rag-type-knowledge { background: #1a2e4a; color: var(--accent); border: 1px solid #2e4a8a; }
+.rag-type-message   { background: #1a3a2a; color: #4ade80;       border: 1px solid #2a6a3a; }
+.rag-source { color: var(--text-2); flex-shrink: 0; max-width: 140px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rag-text   { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Status / error bars ────────────────────────────────────────────────── */
