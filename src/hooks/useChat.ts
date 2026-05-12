@@ -79,6 +79,7 @@ export function useChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [knowledgeChunks, setKnowledgeChunks] = useState<KnowledgeChunk[]>([]);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
+  const [ragEnabled, setRagEnabled] = useState(true);
 
   // Embedding + LLM backend status surfaced to the UI
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
@@ -328,26 +329,30 @@ export function useChat() {
     let ragSourceIds: string[] = [];
     let ragContext = "";
 
-    try {
-      setStatus("embedding");
-      await userEmbedPromise; // need the vector before retrieval
-      const userVec = await embed(
-        text,
-        modelsLoaded.current ? EMBED_MODEL_ID : undefined,
-      );
-      const retrieved = await retrieveTopK(
-        userVec,
-        config.ragTopK,
-        0.3,
-        convId, // exclude current conversation's own messages
-      );
-      ragSourceIds = retrieved.map((r) => r.id);
-      setLastRagChunks(retrieved);
-      if (retrieved.length > 0) {
-        ragContext = buildRagPrompt("", retrieved, "").split("User:")[0].trim();
+    if (ragEnabled) {
+      try {
+        setStatus("embedding");
+        await userEmbedPromise; // need the vector before retrieval
+        const userVec = await embed(
+          text,
+          modelsLoaded.current ? EMBED_MODEL_ID : undefined,
+        );
+        const retrieved = await retrieveTopK(
+          userVec,
+          config.ragTopK,
+          0.3,
+          convId, // exclude current conversation's own messages
+        );
+        ragSourceIds = retrieved.map((r) => r.id);
+        setLastRagChunks(retrieved);
+        if (retrieved.length > 0) {
+          ragContext = buildRagPrompt("", retrieved, "").split("User:")[0].trim();
+        }
+      } catch {
+        // Embedding failed — proceed without RAG context
       }
-    } catch {
-      // Embedding failed — proceed without RAG context
+    } else {
+      setLastRagChunks([]);
     }
 
     setStatus("generating");
@@ -454,6 +459,7 @@ export function useChat() {
     status, error,
     config, conversations, activeConvId, messages, knowledgeChunks,
     streamingContent, lastRagChunks,
+    ragEnabled, setRagEnabled,
     embeddingStatus, embeddingBackend, llmBackend,
     updateConfig,
     loadPreset,

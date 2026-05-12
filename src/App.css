@@ -236,6 +236,25 @@ body { background: var(--bg); height: 100dvh; overflow: hidden; }
   letter-spacing: .02em;
   white-space: nowrap;
 }
+.rag-toggle {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-2);
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 8px;
+  border-radius: 20px;
+  border: 1px solid var(--border);
+  transition: border-color .15s, color .15s;
+}
+.rag-toggle:has(input:checked) {
+  border-color: #2e4a8a;
+  color: var(--accent);
+}
+.rag-toggle input { accent-color: var(--accent); cursor: pointer; }
+
 .badge-litert  { background: #1a2e4a; border: 1px solid #2e4a8a; color: var(--accent); }
 .badge-use     { background: #1a3a2a; border: 1px solid #2a6a3a; color: #4ade80; }
 .badge-bow     { background: #2e2a1a; border: 1px solid #6a5a2a; color: #fbbf24; }

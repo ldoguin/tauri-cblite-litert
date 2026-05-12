@@ -42,11 +42,14 @@ function LlmBadge({ backend }: { backend: LlmBackend }) {
 
 function Toolbar({
   embeddingStatus, llmBackend, isWebLlmLoaded,
+  ragEnabled, onRagToggle,
   onLoadPreset, onLoadWebLlm, onUnloadWebLlm, onConfigureApi, onInitEmbedModel,
 }: {
   embeddingStatus: EmbeddingStatus | null;
   llmBackend: LlmBackend;
   isWebLlmLoaded: boolean;
+  ragEnabled: boolean;
+  onRagToggle: (v: boolean) => void;
   onLoadPreset: (preset: ModelPreset) => void;
   onLoadWebLlm: (opts: WebLlmOptions) => void;
   onUnloadWebLlm: () => void;
@@ -81,6 +84,14 @@ function Toolbar({
       <div className="toolbar-left">
         <EmbedBadge status={embeddingStatus} />
         <LlmBadge backend={llmBackend} />
+        <label className="rag-toggle" title="When enabled, relevant context from the knowledge base and past conversations is injected into every prompt">
+          <input
+            type="checkbox"
+            checked={ragEnabled}
+            onChange={(e) => onRagToggle(e.target.checked)}
+          />
+          RAG
+        </label>
       </div>
 
       <div className="toolbar-right">
@@ -252,6 +263,8 @@ export default function App() {
           embeddingStatus={chat.embeddingStatus}
           llmBackend={chat.llmBackend}
           isWebLlmLoaded={chat.llmBackend === "mediapipe"}
+          ragEnabled={chat.ragEnabled}
+          onRagToggle={chat.setRagEnabled}
           onLoadPreset={chat.loadPreset}
           onLoadWebLlm={chat.loadWebLlmModel}
           onUnloadWebLlm={chat.unloadWebLlmModel}
