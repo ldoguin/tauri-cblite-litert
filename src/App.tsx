@@ -4,6 +4,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { KnowledgePanel } from "./components/KnowledgePanel";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { WebGpuBanner } from "./components/WebGpuBanner";
 import { isTauri, MODEL_PRESETS } from "./lib/llm";
 import type { EmbeddingStatus, RetrievedChunk } from "./lib/rag";
 import type { LlmBackend, ApiConfig, WebLlmOptions, ModelPreset } from "./lib/llm";
@@ -246,6 +247,7 @@ export default function App() {
       />
 
       <main className="main-area">
+        <WebGpuBanner />
         <Toolbar
           embeddingStatus={chat.embeddingStatus}
           llmBackend={chat.llmBackend}

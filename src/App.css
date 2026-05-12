@@ -803,6 +803,69 @@ input[type="range"] {
 .chunk-item:hover .chunk-delete { color: var(--text-2); }
 .chunk-delete:hover { background: var(--bg); color: var(--error) !important; }
 
+/* ── WebGPU banner ──────────────────────────────────────────────────────── */
+
+.webgpu-banner {
+  background: #2a1f0a;
+  border-bottom: 1px solid #7a5a1a;
+  padding: 0 16px;
+}
+
+.webgpu-banner-inner {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  max-width: 900px;
+  margin: 0 auto;
+  padding: 12px 0;
+}
+
+.webgpu-banner-icon { font-size: 20px; flex-shrink: 0; margin-top: 1px; }
+
+.webgpu-banner-body {
+  flex: 1;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+}
+
+.webgpu-banner-body strong {
+  display: block;
+  color: #fbbf24;
+  margin-bottom: 4px;
+  font-size: 13.5px;
+}
+
+.webgpu-banner-body p {
+  color: var(--text-2);
+  margin-bottom: 8px;
+}
+
+.webgpu-steps {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--text-2);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.webgpu-steps li { font-size: 12.5px; }
+.webgpu-steps a  { color: var(--accent); }
+
+.webgpu-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-2);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+  transition: color .15s, background .15s;
+}
+.webgpu-dismiss:hover { background: rgba(255,255,255,.08); color: var(--text); }
+
 /* ── Splash / loading ───────────────────────────────────────────────────── */
 
 .splash {
