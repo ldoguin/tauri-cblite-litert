@@ -13,6 +13,8 @@ export interface Message {
   latencyMs?: number;
   /** Document IDs that were retrieved and used as context */
   ragSourceIds?: string[];
+  /** Embedding vector — set after background vectorisation completes */
+  embedding?: number[];
 }
 
 export interface Conversation {

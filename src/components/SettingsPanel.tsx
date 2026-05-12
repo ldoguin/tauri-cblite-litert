@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { ModelConfig } from "../lib/types";
-import { getWebApiConfig, setWebApiConfig, isWeb } from "../lib/llm";
+import { isTauri } from "../lib/llm";
 
 interface Props {
   config: ModelConfig;
@@ -12,19 +12,12 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
   const [draft, setDraft] = useState<ModelConfig>({ ...config });
   const [saving, setSaving] = useState(false);
 
-  const webApi = getWebApiConfig();
-  const [webApiUrl, setWebApiUrl] = useState(webApi.url);
-  const [webApiKey, setWebApiKey] = useState(webApi.apiKey);
-
   const set = <K extends keyof ModelConfig>(key: K, value: ModelConfig[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      if (isWeb()) {
-        setWebApiConfig(webApiUrl, webApiKey);
-      }
       await onSave(draft);
       onClose();
     } finally {
@@ -45,7 +38,7 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
           <section className="panel-section">
             <h3>Models</h3>
 
-            {!isWeb() && (
+            {isTauri() && (
               <>
                 <label className="field-label">
                   LLM model path (.litertlm)
@@ -76,9 +69,9 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
             <input
               className="field-input"
               placeholder={
-                isWeb()
-                  ? "https://example.com/model.tflite"
-                  : "/path/to/embedding.tflite"
+                isTauri()
+                  ? "/path/to/embedding.tflite"
+                  : "https://example.com/model.tflite"
               }
               value={draft.embeddingModelPath}
               onChange={(e) => set("embeddingModelPath", e.target.value)}
@@ -170,31 +163,13 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
             />
           </section>
 
-          {/* Web API fallback */}
-          {isWeb() && (
+          {!isTauri() && (
             <section className="panel-section">
-              <h3>Web API fallback</h3>
+              <h3>Web backends</h3>
               <p className="hint">
-                LiteRT-LM is not available in the browser. Configure an
-                OpenAI-compatible endpoint (Groq, OpenRouter, Ollama, etc.).
+                Use the toolbar to configure the LLM backend (on-device via
+                MediaPipe, or an OpenAI-compatible API) and the embedding model URL.
               </p>
-
-              <label className="field-label">API base URL</label>
-              <input
-                className="field-input"
-                value={webApiUrl}
-                onChange={(e) => setWebApiUrl(e.target.value)}
-                placeholder="https://api.groq.com/openai/v1"
-              />
-
-              <label className="field-label">API key</label>
-              <input
-                className="field-input"
-                type="password"
-                value={webApiKey}
-                onChange={(e) => setWebApiKey(e.target.value)}
-                placeholder="sk-…"
-              />
             </section>
           )}
         </div>

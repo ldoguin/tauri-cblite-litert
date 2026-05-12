@@ -128,6 +128,20 @@ body { background: var(--bg); height: 100dvh; overflow: hidden; }
   white-space: nowrap;
 }
 
+.conv-action {
+  background: none;
+  border: none;
+  color: transparent;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px;
+  border-radius: 4px;
+  transition: color .15s, background .15s;
+  flex-shrink: 0;
+}
+.conv-item:hover .conv-action { color: var(--text-2); }
+.conv-action:hover { background: var(--bg-3); color: var(--text) !important; }
+
 .conv-delete {
   background: none;
   border: none;
@@ -141,6 +155,19 @@ body { background: var(--bg); height: 100dvh; overflow: hidden; }
 }
 .conv-item:hover .conv-delete { color: var(--text-2); }
 .conv-delete:hover { background: var(--bg-3); color: var(--error) !important; }
+
+.conv-rename-input {
+  flex: 1;
+  background: var(--bg-3);
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 13px;
+  padding: 4px 8px;
+  font-family: inherit;
+  min-width: 0;
+}
+.conv-rename-input:focus { outline: none; }
 
 .sidebar-footer {
   border-top: 1px solid var(--border);
@@ -162,6 +189,119 @@ body { background: var(--bg); height: 100dvh; overflow: hidden; }
   transition: background .15s, color .15s;
 }
 .footer-btn:hover { background: var(--bg-3); color: var(--text); }
+
+/* ── Toolbar ────────────────────────────────────────────────────────────── */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 7px 16px;
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  gap: 10px;
+  flex-wrap: wrap;
+  min-height: 42px;
+}
+
+.toolbar-left  { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.toolbar-right { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+.toolbar-panel-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.toolbar-input {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  padding: 5px 9px;
+  font-family: inherit;
+  min-width: 0;
+}
+.toolbar-input:focus { outline: none; border-color: var(--accent); }
+
+/* Backend badges */
+.badge {
+  font-size: 11px;
+  padding: 2px 9px;
+  border-radius: 20px;
+  font-weight: 600;
+  letter-spacing: .02em;
+  white-space: nowrap;
+}
+.badge-litert  { background: #1a2e4a; border: 1px solid #2e4a8a; color: var(--accent); }
+.badge-use     { background: #1a3a2a; border: 1px solid #2a6a3a; color: #4ade80; }
+.badge-bow     { background: #2e2a1a; border: 1px solid #6a5a2a; color: #fbbf24; }
+.badge-pending { background: var(--bg-3); border: 1px solid var(--border); color: var(--text-2); }
+
+/* Small toolbar buttons */
+.btn-sm {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 12px;
+  font-family: inherit;
+  white-space: nowrap;
+  transition: background .15s;
+}
+.btn-sm:hover:not(:disabled) { background: #2a2f47; }
+.btn-sm:disabled { opacity: .45; cursor: not-allowed; }
+.btn-sm.secondary { color: var(--text-2); }
+.btn-sm.danger { border-color: #7f2020; color: var(--error); }
+.btn-sm.danger:hover { background: #3b1515; }
+
+/* ── RAG debug panel ────────────────────────────────────────────────────── */
+
+.rag-debug-toggle {
+  background: none;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 5px 16px;
+  text-align: left;
+  width: 100%;
+  transition: background .15s;
+}
+.rag-debug-toggle:hover { background: var(--bg-3); }
+
+.rag-debug {
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--border);
+  padding: 10px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.rag-debug-title {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  color: var(--text-2);
+  margin-bottom: 4px;
+}
+
+.rag-debug-chunk {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.rag-score  { color: var(--accent); font-weight: 600; flex-shrink: 0; min-width: 42px; }
+.rag-source { color: var(--text-2); flex-shrink: 0; max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rag-text   { color: var(--text-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Status / error bars ────────────────────────────────────────────────── */
 

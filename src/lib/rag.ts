@@ -1,29 +1,188 @@
 /**
  * rag.ts — Retrieval-Augmented Generation pipeline.
  *
- * Flow:
- *   1. Embed the user query with the embedding model (LiteRT).
- *   2. Cosine-similarity search over all stored KnowledgeChunks.
- *   3. Return the top-K chunks to inject into the LLM prompt.
+ * Embedding backends (in priority order):
+ *   1. LiteRT (.tflite via tauri-plugin-litert on desktop/Android, @litertjs/core on web)
+ *   2. TensorFlow.js Universal Sentence Encoder (web fallback, no model file needed)
+ *   3. Bag-of-Words djb2 hash (offline fallback, no network required)
  *
- * Text chunking for ingestion:
- *   splitIntoChunks() splits raw text into overlapping windows so that
- *   context is not lost at chunk boundaries.
+ * Retrieval:
+ *   - Cosine similarity over all stored KnowledgeChunks
+ *   - Configurable topK and minimum score threshold
+ *   - Can exclude chunks from a specific conversation (cross-conversation RAG)
  */
 
 import { createEmbedding } from "tauri-plugin-litert-api";
 import { listKnowledgeChunks } from "./db";
 import type { KnowledgeChunk } from "./types";
 
-// ── Chunking ───────────────────────────────────────────────────────────────
+// ── Embedding backend state ────────────────────────────────────────────────
 
-const CHUNK_SIZE = 400;   // characters per chunk
-const CHUNK_OVERLAP = 80; // overlap between consecutive chunks
+export type EmbeddingBackend = "litert" | "use" | "bow";
+
+export type EmbeddingStatus =
+  | { backend: "litert"; modelUrl: string }
+  | { backend: "use" }
+  | { backend: "bow"; reason: string };
+
+type UseModel = {
+  embed(sentences: string[]): Promise<{ arraySync(): number[][] }>;
+};
+
+let activeBackend: EmbeddingBackend = "bow";
+let useModel: UseModel | null = null;
+let initPromise: Promise<EmbeddingStatus> | null = null;
+
+// ── Initialisation ─────────────────────────────────────────────────────────
 
 /**
- * Splits `text` into overlapping character-window chunks.
- * Returns an array of chunk strings.
+ * Initialise the embedding engine.
+ * On Tauri (desktop/Android) the plugin handles LiteRT directly via IPC —
+ * no JS-side init needed. On web, tries LiteRT → USE → BoW in order.
+ *
+ * Call once at app startup. Re-call with a new URL to switch models.
  */
+export function initEmbeddings(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
+  if (initPromise && !(liteRtModelUrl && activeBackend !== "litert")) return initPromise;
+  initPromise = _init(liteRtModelUrl);
+  return initPromise;
+}
+
+async function _init(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
+  // On Tauri the plugin owns the LiteRT runtime — no JS init needed.
+  if (isTauri()) {
+    activeBackend = "litert";
+    return { backend: "litert", modelUrl: liteRtModelUrl ?? "" };
+  }
+
+  // Web: try LiteRT via @litertjs/core
+  if (liteRtModelUrl) {
+    try {
+      const { loadLiteRt, loadAndCompile } = await import("@litertjs/core");
+      await loadLiteRt("https://cdn.jsdelivr.net/npm/@litertjs/core/wasm/");
+      await loadAndCompile(liteRtModelUrl, { accelerator: "wasm" });
+      activeBackend = "litert";
+      return { backend: "litert", modelUrl: liteRtModelUrl };
+    } catch (err) {
+      console.warn("[rag] LiteRT init failed, falling back to USE:", err);
+    }
+  }
+
+  // Web: try TF.js Universal Sentence Encoder
+  try {
+    const tf = await import("@tensorflow/tfjs");
+    await tf.ready();
+    const use = await import("@tensorflow-models/universal-sentence-encoder");
+    useModel = (await use.load()) as UseModel;
+    activeBackend = "use";
+    return { backend: "use" };
+  } catch (err) {
+    console.warn("[rag] USE init failed, using bag-of-words fallback:", err);
+    activeBackend = "bow";
+    return { backend: "bow", reason: String(err) };
+  }
+}
+
+export function getEmbeddingBackend(): EmbeddingBackend {
+  return activeBackend;
+}
+
+// ── Embedding ──────────────────────────────────────────────────────────────
+
+/**
+ * Embed a single text string using the active backend.
+ * On Tauri, delegates to the loaded LiteRT model via the plugin.
+ * On web, uses USE or BoW depending on what initialised successfully.
+ */
+export async function embed(
+  text: string,
+  /** Only used on Tauri — the model ID registered with tauri-plugin-litert */
+  liteRtModelId?: string,
+): Promise<number[]> {
+  if (!initPromise) await initEmbeddings();
+
+  if (isTauri() && liteRtModelId) {
+    return embedWithLiteRtPlugin(text, liteRtModelId);
+  }
+  if (activeBackend === "use" && useModel) {
+    return embedWithUse(text);
+  }
+  return bowEmbed(text);
+}
+
+async function embedWithLiteRtPlugin(text: string, modelId: string): Promise<number[]> {
+  const tokens = tokenise(text);
+  const { embedding } = await createEmbedding({ modelId, input: tokens });
+  return l2Normalise(embedding);
+}
+
+async function embedWithUse(text: string): Promise<number[]> {
+  if (!useModel) throw new Error("USE model not loaded");
+  const embeddings = await useModel.embed([text]);
+  return l2Normalise(embeddings.arraySync()[0]);
+}
+
+// ── Tokeniser (djb2 hash, matches plugin example) ──────────────────────────
+
+/**
+ * Maps text → int32[seqLen] token IDs using a djb2 character hash.
+ * For production, replace with a BPE/WordPiece tokeniser matching your model.
+ */
+function tokenise(text: string, seqLen = 128): number[] {
+  const tokens = new Array<number>(seqLen).fill(0);
+  const words = text.toLowerCase().split(/\s+/).slice(0, seqLen);
+  for (let i = 0; i < words.length; i++) {
+    let h = 5381;
+    for (let j = 0; j < words[i].length; j++)
+      h = ((h << 5) + h) ^ words[i].charCodeAt(j);
+    tokens[i] = Math.abs(h) % 30000;
+  }
+  return tokens;
+}
+
+// ── Bag-of-Words fallback ──────────────────────────────────────────────────
+
+function bowEmbed(text: string, dim = 512): number[] {
+  const vec = new Float32Array(dim);
+  const words = text.toLowerCase().split(/\s+/);
+  for (const w of words) {
+    let h = 5381;
+    for (let i = 0; i < w.length; i++) h = ((h << 5) + h) ^ w.charCodeAt(i);
+    vec[Math.abs(h) % dim] += 1;
+  }
+  return l2Normalise(Array.from(vec));
+}
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function l2Normalise(vec: number[]): number[] {
+  let norm = 0;
+  for (const v of vec) norm += v * v;
+  norm = Math.sqrt(norm);
+  return norm === 0 ? vec : vec.map((v) => v / norm);
+}
+
+export function cosineSimilarity(a: number[], b: number[]): number {
+  if (a.length !== b.length || a.length === 0) return 0;
+  let dot = 0, normA = 0, normB = 0;
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i] * b[i];
+    normA += a[i] * a[i];
+    normB += b[i] * b[i];
+  }
+  const denom = Math.sqrt(normA) * Math.sqrt(normB);
+  return denom === 0 ? 0 : dot / denom;
+}
+
+function isTauri(): boolean {
+  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+}
+
+// ── Chunking ───────────────────────────────────────────────────────────────
+
+const CHUNK_SIZE = 400;
+const CHUNK_OVERLAP = 80;
+
 export function splitIntoChunks(text: string): string[] {
   const chunks: string[] = [];
   let start = 0;
@@ -36,59 +195,6 @@ export function splitIntoChunks(text: string): string[] {
   return chunks.filter((c) => c.length > 20);
 }
 
-// ── Embedding ──────────────────────────────────────────────────────────────
-
-/**
- * Tokenises text with a simple whitespace tokeniser and returns token IDs
- * as a flat number array suitable for the embedding model.
- *
- * For production use, replace this with a proper BPE/WordPiece tokeniser
- * that matches the embedding model's vocabulary.
- */
-function naiveTokenise(text: string, maxLen = 128): number[] {
-  const tokens = text
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
-    .split(/\s+/)
-    .filter(Boolean)
-    .slice(0, maxLen)
-    .map((w) => {
-      // Deterministic hash → token ID in [1, 30000]
-      let h = 0;
-      for (let i = 0; i < w.length; i++) {
-        h = (Math.imul(31, h) + w.charCodeAt(i)) | 0;
-      }
-      return (Math.abs(h) % 29999) + 1;
-    });
-  // Pad to maxLen
-  while (tokens.length < maxLen) tokens.push(0);
-  return tokens;
-}
-
-/** Embeds a single text string using the loaded LiteRT embedding model. */
-export async function embedText(
-  modelId: string,
-  text: string,
-): Promise<number[]> {
-  const tokens = naiveTokenise(text);
-  const { embedding } = await createEmbedding({ modelId, input: tokens });
-  return embedding;
-}
-
-// ── Similarity ─────────────────────────────────────────────────────────────
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  if (a.length !== b.length || a.length === 0) return 0;
-  let dot = 0, normA = 0, normB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    normA += a[i] * a[i];
-    normB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(normA) * Math.sqrt(normB);
-  return denom === 0 ? 0 : dot / denom;
-}
-
 // ── Retrieval ──────────────────────────────────────────────────────────────
 
 export interface RetrievedChunk {
@@ -98,41 +204,35 @@ export interface RetrievedChunk {
 
 /**
  * Retrieves the top-K knowledge chunks most similar to `queryEmbedding`.
- * All chunks are loaded from CouchbaseLite and ranked in-memory.
+ *
+ * @param queryEmbedding         Embedding of the user query
+ * @param topK                   Maximum number of chunks to return
+ * @param threshold              Minimum cosine similarity (default 0.3)
+ * @param excludeConversationId  Skip chunks whose source matches this ID
  */
 export async function retrieveTopK(
   queryEmbedding: number[],
   topK: number,
+  threshold = 0.3,
+  excludeConversationId?: string,
 ): Promise<RetrievedChunk[]> {
   const chunks = await listKnowledgeChunks();
   if (chunks.length === 0) return [];
 
-  const scored = chunks
-    .filter((c) => c.embedding && c.embedding.length > 0)
-    .map((chunk) => ({
-      chunk,
-      score: cosineSimilarity(queryEmbedding, chunk.embedding),
-    }))
+  return chunks
+    .filter((c) => {
+      if (!c.embedding || c.embedding.length === 0) return false;
+      if (excludeConversationId && c.source === excludeConversationId) return false;
+      return true;
+    })
+    .map((chunk) => ({ chunk, score: cosineSimilarity(queryEmbedding, chunk.embedding) }))
+    .filter(({ score }) => score >= threshold)
     .sort((a, b) => b.score - a.score)
     .slice(0, topK);
-
-  return scored;
 }
 
 // ── Prompt building ────────────────────────────────────────────────────────
 
-/**
- * Builds the final prompt string injected into the LLM.
- *
- * Structure:
- *   [System instruction]
- *   --- Retrieved context ---
- *   [chunk 1]
- *   [chunk 2]
- *   ...
- *   --- End of context ---
- *   User: <query>
- */
 export function buildRagPrompt(
   query: string,
   retrievedChunks: RetrievedChunk[],

@@ -1,12 +1,15 @@
 /**
  * useChat — central state and logic for the RAG chatbot.
  *
- * Manages:
- *   - Database initialisation
- *   - Model loading / unloading
- *   - Conversation CRUD
- *   - Message streaming with RAG retrieval
- *   - Knowledge base ingestion
+ * Key changes vs initial version (informed by plugin example):
+ * - Both user AND assistant messages are embedded after generation completes
+ *   so the vector index grows with every conversation turn.
+ * - generateStream() now receives the full message history + ragContext
+ *   separately, matching the example's API shape.
+ * - Embedding backend is initialised via initEmbeddings() and its status
+ *   is surfaced to the UI (litert / use / bow).
+ * - LLM backend state (tauri / mediapipe / api / mock) is surfaced to the UI.
+ * - Web API config is persisted to localStorage via persistApiConfig().
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -26,17 +29,29 @@ import {
   deleteKnowledgeChunk,
 } from "../lib/db";
 import {
-  embedText,
+  embed,
+  initEmbeddings,
+  getEmbeddingBackend,
   retrieveTopK,
   buildRagPrompt,
   splitIntoChunks,
+  type EmbeddingStatus,
+  type EmbeddingBackend,
 } from "../lib/rag";
 import {
   loadModels,
   unloadModels,
-  streamGenerate,
+  generateStream,
+  loadWebLlm,
+  unloadWebLlm,
+  getActiveBackend,
+  persistApiConfig,
+  loadPersistedApiConfig,
+  isTauri,
   EMBED_MODEL_ID,
-  isWeb,
+  type LlmBackend,
+  type ApiConfig,
+  type WebLlmOptions,
 } from "../lib/llm";
 import type {
   Conversation,
@@ -46,10 +61,8 @@ import type {
   AppStatus,
 } from "../lib/types";
 
-// Resolve the database directory at runtime.
-// On Tauri desktop/mobile, use the app data dir; on web, use a relative path.
 async function resolveDbDir(): Promise<string> {
-  if (isWeb()) return "/tmp/rag-chatbot";
+  if (!isTauri()) return "/tmp/rag-chatbot";
   const { appDataDir } = await import("@tauri-apps/api/path");
   return appDataDir();
 }
@@ -63,9 +76,17 @@ export function useChat() {
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [knowledgeChunks, setKnowledgeChunks] = useState<KnowledgeChunk[]>([]);
-
-  // Streaming assistant message being built token-by-token
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
+
+  // Embedding + LLM backend status surfaced to the UI
+  const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null);
+  const [embeddingBackend, setEmbeddingBackend] = useState<EmbeddingBackend>("bow");
+  const [llmBackend, setLlmBackend] = useState<LlmBackend>("mock");
+
+  // RAG debug: last retrieved chunks shown in the UI
+  const [lastRagChunks, setLastRagChunks] = useState<
+    Array<{ text: string; source: string; score: number }>
+  >([]);
 
   const modelsLoaded = useRef(false);
 
@@ -87,11 +108,23 @@ export function useChat() {
         const chunks = await listKnowledgeChunks();
         setKnowledgeChunks(chunks);
 
+        // Restore persisted web API config
+        loadPersistedApiConfig();
+
+        // Initialise embedding engine
+        const embStatus = await initEmbeddings(
+          !isTauri() ? cfg.embeddingModelPath || undefined : undefined,
+        );
+        setEmbeddingStatus(embStatus);
+        setEmbeddingBackend(getEmbeddingBackend());
+
+        // Load LiteRT models on Tauri
         if (cfg.lmModelPath || cfg.embeddingModelPath) {
           await loadModels(cfg);
           modelsLoaded.current = true;
         }
 
+        setLlmBackend(getActiveBackend());
         setStatus("ready");
       } catch (err) {
         setError(String(err));
@@ -99,44 +132,64 @@ export function useChat() {
       }
     })();
 
-    return () => {
-      unloadModels().catch(() => {});
-    };
+    return () => { unloadModels().catch(() => {}); };
   }, []);
 
   // ── Config ───────────────────────────────────────────────────────────────
 
-  const updateConfig = useCallback(
-    async (next: ModelConfig) => {
-      await saveConfig(next);
-      setConfigState(next);
+  const updateConfig = useCallback(async (next: ModelConfig) => {
+    await saveConfig(next);
+    setConfigState(next);
+    if (modelsLoaded.current) { await unloadModels(); modelsLoaded.current = false; }
+    if (next.lmModelPath || next.embeddingModelPath) {
+      setStatus("loading-models");
+      await loadModels(next);
+      modelsLoaded.current = true;
+      setStatus("ready");
+    }
+    setLlmBackend(getActiveBackend());
+  }, []);
 
-      // Reload models if paths changed
-      if (modelsLoaded.current) {
-        await unloadModels();
-        modelsLoaded.current = false;
-      }
-      if (next.lmModelPath || next.embeddingModelPath) {
-        setStatus("loading-models");
-        await loadModels(next);
-        modelsLoaded.current = true;
-        setStatus("ready");
-      }
-    },
-    [],
-  );
+  // ── Web LLM (MediaPipe) ──────────────────────────────────────────────────
+
+  const loadWebLlmModel = useCallback(async (opts: WebLlmOptions) => {
+    setStatus("loading-models");
+    try {
+      await loadWebLlm(opts);
+      setLlmBackend(getActiveBackend());
+      setStatus("ready");
+    } catch (err) {
+      setError(String(err));
+      setStatus("error");
+    }
+  }, []);
+
+  const unloadWebLlmModel = useCallback(() => {
+    unloadWebLlm();
+    setLlmBackend(getActiveBackend());
+  }, []);
+
+  // ── API config ───────────────────────────────────────────────────────────
+
+  const configureApi = useCallback((cfg: ApiConfig) => {
+    persistApiConfig(cfg);
+    setLlmBackend(getActiveBackend());
+  }, []);
+
+  // ── Embedding engine ─────────────────────────────────────────────────────
+
+  const initEmbeddingEngine = useCallback(async (liteRtModelUrl?: string) => {
+    const status = await initEmbeddings(liteRtModelUrl);
+    setEmbeddingStatus(status);
+    setEmbeddingBackend(getEmbeddingBackend());
+  }, []);
 
   // ── Conversations ────────────────────────────────────────────────────────
 
   const createConversation = useCallback(async (): Promise<string> => {
     const id = uuidv4();
     const now = new Date().toISOString();
-    const conv: Conversation = {
-      id,
-      title: "New conversation",
-      createdAt: now,
-      updatedAt: now,
-    };
+    const conv: Conversation = { id, title: "New conversation", createdAt: now, updatedAt: now };
     await saveConversation(conv);
     setConversations((prev) => [conv, ...prev]);
     return id;
@@ -144,126 +197,166 @@ export function useChat() {
 
   const selectConversation = useCallback(async (id: string) => {
     setActiveConvId(id);
+    setLastRagChunks([]);
     const msgs = await listMessages(id);
     setMessages(msgs);
   }, []);
 
-  const renameConversation = useCallback(
-    async (id: string, title: string) => {
-      const conv = await getConversation(id);
-      if (!conv) return;
-      const updated = { ...conv, title, updatedAt: new Date().toISOString() };
-      await saveConversation(updated);
-      setConversations((prev) =>
-        prev.map((c) => (c.id === id ? updated : c)),
+  const renameConversation = useCallback(async (id: string, title: string) => {
+    const conv = await getConversation(id);
+    if (!conv) return;
+    const updated = { ...conv, title, updatedAt: new Date().toISOString() };
+    await saveConversation(updated);
+    setConversations((prev) => prev.map((c) => (c.id === id ? updated : c)));
+  }, []);
+
+  const removeConversation = useCallback(async (id: string) => {
+    await deleteConversation(id);
+    setConversations((prev) => prev.filter((c) => c.id !== id));
+    if (activeConvId === id) { setActiveConvId(null); setMessages([]); }
+  }, [activeConvId]);
+
+  // ── Embed a message and save its vector back to CouchbaseLite ────────────
+
+  const embedAndSave = useCallback(async (msg: Message) => {
+    try {
+      const vec = await embed(
+        msg.content,
+        modelsLoaded.current ? EMBED_MODEL_ID : undefined,
       );
-    },
-    [],
-  );
+      const updated: Message = { ...msg, embedding: vec };
+      await saveMessage(updated);
+      setMessages((prev) => prev.map((m) => (m.id === msg.id ? updated : m)));
+    } catch (e) {
+      console.warn("[useChat] embed failed:", e);
+    }
+  }, []);
 
-  const removeConversation = useCallback(
-    async (id: string) => {
-      await deleteConversation(id);
-      setConversations((prev) => prev.filter((c) => c.id !== id));
-      if (activeConvId === id) {
-        setActiveConvId(null);
-        setMessages([]);
+  // ── Send a message ───────────────────────────────────────────────────────
+
+  const sendMessage = useCallback(async (text: string) => {
+    if (!config) return;
+    if (status === "generating" || status === "embedding") return;
+
+    let convId = activeConvId;
+    if (!convId) {
+      convId = await createConversation();
+      setActiveConvId(convId);
+    }
+
+    // Persist user message
+    const userMsg: Message = {
+      id: uuidv4(),
+      conversationId: convId,
+      role: "user",
+      content: text,
+      createdAt: new Date().toISOString(),
+    };
+    await saveMessage(userMsg);
+    setMessages((prev) => [...prev, userMsg]);
+
+    // Auto-title from first user message
+    const conv = conversations.find((c) => c.id === convId);
+    if (conv?.title === "New conversation") {
+      await renameConversation(convId, text.slice(0, 60) + (text.length > 60 ? "…" : ""));
+    }
+
+    // Embed user message in background (don't block generation)
+    const userEmbedPromise = embedAndSave(userMsg);
+
+    setStatus("generating");
+    setStreamingContent("");
+    setLastRagChunks([]);
+
+    // ── RAG retrieval ──────────────────────────────────────────────────────
+    let ragSourceIds: string[] = [];
+    let ragContext = "";
+
+    try {
+      setStatus("embedding");
+      await userEmbedPromise; // need the vector before retrieval
+      const userVec = await embed(
+        text,
+        modelsLoaded.current ? EMBED_MODEL_ID : undefined,
+      );
+      const retrieved = await retrieveTopK(
+        userVec,
+        config.ragTopK,
+        0.3,
+        convId, // exclude current conversation's own chunks
+      );
+      ragSourceIds = retrieved.map((r) => r.chunk.id);
+      setLastRagChunks(
+        retrieved.map(({ chunk, score }) => ({
+          text: chunk.text,
+          source: chunk.source,
+          score,
+        })),
+      );
+      if (retrieved.length > 0) {
+        ragContext = buildRagPrompt("", retrieved, "").split("User:")[0].trim();
       }
-    },
-    [activeConvId],
-  );
+    } catch {
+      // Embedding failed — proceed without RAG context
+    }
 
-  // ── Sending a message ────────────────────────────────────────────────────
+    setStatus("generating");
 
-  const sendMessage = useCallback(
-    async (text: string) => {
-      if (!config) return;
-      if (status === "generating") return;
+    // ── Build history for the LLM ──────────────────────────────────────────
+    const history = messages
+      .concat(userMsg)
+      .map((m) => ({ role: m.role, content: m.content }));
 
-      let convId = activeConvId;
-      if (!convId) {
-        convId = await createConversation();
-        setActiveConvId(convId);
-      }
+    // ── Stream generation ──────────────────────────────────────────────────
+    let accumulated = "";
+    const assistantId = uuidv4();
 
-      // Persist user message
-      const userMsg: Message = {
-        id: uuidv4(),
-        conversationId: convId,
-        role: "user",
-        content: text,
-        createdAt: new Date().toISOString(),
-      };
-      await saveMessage(userMsg);
-      setMessages((prev) => [...prev, userMsg]);
+    // Add placeholder so the streaming bubble has an ID to update
+    const placeholderMsg: Message = {
+      id: assistantId,
+      conversationId: convId,
+      role: "assistant",
+      content: "",
+      createdAt: new Date().toISOString(),
+    };
+    setMessages((prev) => [...prev, placeholderMsg]);
 
-      // Auto-title the conversation from the first user message
-      const conv = conversations.find((c) => c.id === convId);
-      if (conv && conv.title === "New conversation") {
-        const title = text.slice(0, 60) + (text.length > 60 ? "…" : "");
-        await renameConversation(convId, title);
-      }
-
-      setStatus("generating");
-      setStreamingContent("");
-
-      // ── RAG retrieval ──────────────────────────────────────────────────
-      let ragSourceIds: string[] = [];
-      let prompt = text;
-
-      if (modelsLoaded.current && config.embeddingModelPath) {
-        try {
-          setStatus("embedding");
-          const queryEmbedding = await embedText(EMBED_MODEL_ID, text);
-          const retrieved = await retrieveTopK(queryEmbedding, config.ragTopK);
-          ragSourceIds = retrieved.map((r) => r.chunk.id);
-
-          const systemInstruction =
-            conv?.systemInstruction ??
-            "You are a helpful assistant. Answer using only the provided context when relevant.";
-
-          prompt = buildRagPrompt(text, retrieved, systemInstruction);
-        } catch {
-          // Embedding failed — fall back to plain generation
-        }
-      }
-
-      setStatus("generating");
-
-      // ── LLM generation ─────────────────────────────────────────────────
-      let accumulated = "";
-      const assistantId = uuidv4();
-
-      await streamGenerate({
-        prompt,
-        systemInstruction:
-          conv?.systemInstruction ??
-          "You are a helpful assistant.",
+    await generateStream(
+      history,
+      ragContext,
+      {
+        modelId: config.lmModelPath ? "rag-lm" : undefined,
+        systemInstruction: conv?.systemInstruction ??
+          "You are a helpful assistant. Answer using the provided context when relevant.",
         config,
+      },
+      {
         onChunk: (chunk) => {
           accumulated += chunk;
           setStreamingContent(accumulated);
+          setMessages((prev) =>
+            prev.map((m) => m.id === assistantId ? { ...m, content: accumulated } : m),
+          );
         },
         onDone: async (latencyMs) => {
           setStreamingContent(null);
           const assistantMsg: Message = {
-            id: assistantId,
-            conversationId: convId!,
-            role: "assistant",
+            ...placeholderMsg,
             content: accumulated,
-            createdAt: new Date().toISOString(),
             latencyMs,
             ragSourceIds,
           };
           await saveMessage(assistantMsg);
-          setMessages((prev) => [...prev, assistantMsg]);
+          setMessages((prev) =>
+            prev.map((m) => m.id === assistantId ? assistantMsg : m),
+          );
+
+          // Embed the completed assistant message (index both sides)
+          embedAndSave(assistantMsg);
 
           // Update conversation timestamp
           if (conv) {
-            await saveConversation({
-              ...conv,
-              updatedAt: new Date().toISOString(),
-            });
+            await saveConversation({ ...conv, updatedAt: new Date().toISOString() });
           }
           setStatus("ready");
         },
@@ -272,46 +365,35 @@ export function useChat() {
           setError(err);
           setStatus("error");
         },
-      });
-    },
-    [
-      config,
-      status,
-      activeConvId,
-      conversations,
-      createConversation,
-      renameConversation,
-    ],
-  );
+      },
+    );
+  }, [
+    config, status, activeConvId, conversations, messages,
+    createConversation, renameConversation, embedAndSave,
+  ]);
 
   // ── Knowledge base ───────────────────────────────────────────────────────
 
-  const ingestText = useCallback(
-    async (source: string, rawText: string) => {
-      if (!config?.embeddingModelPath || !modelsLoaded.current) {
-        throw new Error("Embedding model not loaded. Configure it in Settings.");
-      }
-
-      setStatus("embedding");
-      const chunks = splitIntoChunks(rawText);
-
-      for (const text of chunks) {
-        const embedding = await embedText(EMBED_MODEL_ID, text);
-        const chunk: KnowledgeChunk = {
-          id: uuidv4(),
-          source,
-          text,
-          embedding,
-          createdAt: new Date().toISOString(),
-        };
-        await saveKnowledgeChunk(chunk);
-        setKnowledgeChunks((prev) => [chunk, ...prev]);
-      }
-
-      setStatus("ready");
-    },
-    [config],
-  );
+  const ingestText = useCallback(async (source: string, rawText: string) => {
+    setStatus("embedding");
+    const chunks = splitIntoChunks(rawText);
+    for (const text of chunks) {
+      const embedding = await embed(
+        text,
+        modelsLoaded.current ? EMBED_MODEL_ID : undefined,
+      );
+      const chunk: KnowledgeChunk = {
+        id: uuidv4(),
+        source,
+        text,
+        embedding,
+        createdAt: new Date().toISOString(),
+      };
+      await saveKnowledgeChunk(chunk);
+      setKnowledgeChunks((prev) => [chunk, ...prev]);
+    }
+    setStatus("ready");
+  }, []);
 
   const removeKnowledgeChunk = useCallback(async (id: string) => {
     await deleteKnowledgeChunk(id);
@@ -319,24 +401,16 @@ export function useChat() {
   }, []);
 
   return {
-    // State
-    status,
-    error,
-    config,
-    conversations,
-    activeConvId,
-    messages,
-    knowledgeChunks,
-    streamingContent,
-    // Actions
+    status, error,
+    config, conversations, activeConvId, messages, knowledgeChunks,
+    streamingContent, lastRagChunks,
+    embeddingStatus, embeddingBackend, llmBackend,
     updateConfig,
-    createConversation,
-    selectConversation,
-    renameConversation,
-    removeConversation,
+    loadWebLlmModel, unloadWebLlmModel,
+    configureApi, initEmbeddingEngine,
+    createConversation, selectConversation, renameConversation, removeConversation,
     sendMessage,
-    ingestText,
-    removeKnowledgeChunk,
+    ingestText, removeKnowledgeChunk,
     clearError: () => setError(null),
   };
 }
