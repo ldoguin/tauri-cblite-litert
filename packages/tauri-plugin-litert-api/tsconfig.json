@@ -6,7 +6,8 @@
     "strict": true,
     "declaration": true,
     "outDir": "dist",
-    "lib": ["ES2020", "DOM", "DOM.Iterable", "DOM.WebGPU"]
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "types": ["@webgpu/types"]
   },
   "include": ["src"]
 }

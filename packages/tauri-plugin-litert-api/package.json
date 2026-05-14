@@ -17,6 +17,9 @@
     "build": "tsc",
     "prepare": "tsc"
   },
+  "devDependencies": {
+    "@webgpu/types": "^0.1.54"
+  },
   "dependencies": {
     "@tauri-apps/api": "^2"
   },
