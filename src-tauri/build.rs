@@ -8,16 +8,15 @@ fn main() {
 
 // ── Linux runtime library fixups ─────────────────────────────────────────────
 //
-// A) Cargo does not propagate `rustc-link-arg` transitively — re-emit rpaths.
+// Strategy: copy all prebuilt .so files that have broken or missing runtime
+// paths into OUT_DIR, patch libLiteRtLmC.so's RUNPATH to $ORIGIN, and emit
+// a single rpath pointing to OUT_DIR. This avoids hardcoding any absolute
+// home-directory paths into the binary — OUT_DIR is inside the build tree
+// and the rpath is written as an absolute path to the current machine's
+// OUT_DIR, which is correct for the binary built on that machine.
 //
-// B) libGemmaModelConstraintProvider.so is absent from litert-sys 0.2.1's
-//    Linux prebuilt list but is a hard NEEDED dep of libLiteRtLmC.so.
-//    Downloaded once into the litert-sys cache dir (stable across rebuilds).
-//
-// C) libLiteRtLmC.so ships with a Bazel RUNPATH. A patched copy is kept in
-//    the litert-lm-sys cache dir alongside a symlink to the Gemma library.
-//    The cache dir is stable — OUT_DIR changes every rebuild and would
-//    trigger a re-download loop.
+// The download is cached in the litert-sys cache dir so it only happens once
+// per machine regardless of how many times the build runs.
 
 const LITERT_TAG: &str = "v0.10.2";
 const GEMMA_LIB: &str = "libGemmaModelConstraintProvider.so";
@@ -25,20 +24,14 @@ const LITERTLM_LIB: &str = "libLiteRtLmC.so";
 
 fn linux_fixups() {
     let target     = std::env::var("TARGET").unwrap_or_default();
+    let out_dir    = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let cache_root = cache_root();
     let cargo_home = cargo_home();
 
-    let litert_dir   = cache_root.join("litert-sys")   .join(LITERT_TAG).join(&target);
-    let litertlm_dir = cache_root.join("litert-lm-sys").join(LITERT_TAG).join(&target);
+    let litert_cache   = cache_root.join("litert-sys")   .join(LITERT_TAG).join(&target);
+    let litertlm_cache = cache_root.join("litert-lm-sys").join(LITERT_TAG).join(&target);
 
-    // ── A. Re-emit rpaths ─────────────────────────────────────────────────
-    for dir in &[&litert_dir, &litertlm_dir] {
-        if dir.is_dir() {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{}", dir.display());
-        }
-    }
-
-    // couchbase-lite-rust (libcblite.so.3)
+    // ── cblite rpath (its own cache dir is fine — absolute path from this machine) ──
     let cblite_git = cargo_home.join("git").join("checkouts");
     if cblite_git.is_dir() {
         if let Ok(entries) = std::fs::read_dir(&cblite_git) {
@@ -63,52 +56,72 @@ fn linux_fixups() {
         "aarch64-unknown-linux-gnu" => "linux_arm64",
         other => {
             println!("cargo:warning=build.rs: no LiteRT extras for target {other}");
-            // Still rerun when cache dirs appear
-            println!("cargo:rerun-if-changed={}", litert_dir.display());
-            println!("cargo:rerun-if-changed={}", litertlm_dir.display());
+            println!("cargo:rerun-if-changed={}", litertlm_cache.display());
             return;
         }
     };
 
-    std::fs::create_dir_all(&litert_dir).expect("create litert-sys cache dir");
-    std::fs::create_dir_all(&litertlm_dir).expect("create litert-lm-sys cache dir");
+    std::fs::create_dir_all(&litert_cache).expect("create litert-sys cache dir");
+    std::fs::create_dir_all(&litertlm_cache).expect("create litert-lm-sys cache dir");
 
-    // ── B. Download libGemmaModelConstraintProvider.so once ───────────────
-    // Stored in the litert-sys cache dir — stable across rebuilds so we
-    // never re-download unless the file is missing.
-    let gemma_in_litert = litert_dir.join(GEMMA_LIB);
-    if !gemma_in_litert.exists() {
+    // ── Download libGemmaModelConstraintProvider.so into the cache (once) ──
+    let gemma_cache = litert_cache.join(GEMMA_LIB);
+    if !gemma_cache.exists() {
         let url = format!(
             "https://media.githubusercontent.com/media/google-ai-edge/LiteRT-LM/{}/prebuilt/{}/{}",
             LITERT_TAG, upstream_dir, GEMMA_LIB,
         );
-        download_file(&gemma_in_litert, &url);
+        download_file(&gemma_cache, &url);
     }
 
-    // ── C. Keep a patched libLiteRtLmC.so in the litert-lm-sys cache dir ──
-    // Symlink the Gemma library next to it so $ORIGIN resolves correctly.
-    let litertlm_src  = litertlm_dir.join(LITERTLM_LIB);
-    let gemma_symlink = litertlm_dir.join(GEMMA_LIB);
+    // ── Copy libLiteRtLmC.so + libGemmaModelConstraintProvider.so into OUT_DIR ──
+    // OUT_DIR is machine-local and inside the build tree. The rpath we emit
+    // points to OUT_DIR as an absolute path on THIS machine — no hardcoded
+    // home directories from a different machine (e.g. the devcontainer).
+    //
+    // libLiteRtLmC.so is patched to $ORIGIN so it finds the Gemma library
+    // in the same OUT_DIR directory.
+
+    let litertlm_src = litertlm_cache.join(LITERTLM_LIB);
 
     // Rerun when the upstream file appears (litert-lm-sys downloads it on
-    // the same build invocation; Cargo will re-run us on the next build).
+    // the same build; Cargo re-runs us next build once it exists).
     println!("cargo:rerun-if-changed={}", litertlm_src.display());
-    println!("cargo:rerun-if-changed={}", litert_dir.display());
-    println!("cargo:rerun-if-changed={}", litertlm_dir.display());
+    println!("cargo:rerun-if-changed={}", litert_cache.display());
+    println!("cargo:rerun-if-changed={}", litertlm_cache.display());
 
-    if litertlm_src.exists() {
-        // Patch RUNPATH in-place (idempotent — skipped if already $ORIGIN).
-        patch_runpath(&litertlm_src);
-
-        // Symlink so $ORIGIN finds the Gemma library in the same dir.
-        if !gemma_symlink.exists() {
-            std::os::unix::fs::symlink(&gemma_in_litert, &gemma_symlink)
-                .expect("symlink libGemmaModelConstraintProvider.so");
-        }
-    } else {
+    if !litertlm_src.exists() {
         println!("cargo:warning=build.rs: {LITERTLM_LIB} not in cache yet — \
-                  will be patched on next build after litert-lm-sys downloads it.");
+                  will be set up on next build after litert-lm-sys downloads it.");
+        return;
     }
+
+    // Copy Gemma lib into OUT_DIR.
+    let gemma_out = out_dir.join(GEMMA_LIB);
+    if !gemma_out.exists() {
+        std::fs::copy(&gemma_cache, &gemma_out)
+            .unwrap_or_else(|e| panic!("copy {GEMMA_LIB} to OUT_DIR: {e}"));
+    }
+
+    // Copy libLiteRtLmC.so into OUT_DIR and patch its RUNPATH to $ORIGIN.
+    let litertlm_out = out_dir.join(LITERTLM_LIB);
+    let needs_copy = !litertlm_out.exists()
+        || file_size(&litertlm_src) != file_size(&litertlm_out);
+    if needs_copy {
+        std::fs::copy(&litertlm_src, &litertlm_out)
+            .unwrap_or_else(|e| panic!("copy {LITERTLM_LIB} to OUT_DIR: {e}"));
+        patch_runpath(&litertlm_out);
+    }
+
+    // Also emit rpath for litert-sys cache (libLiteRt.so etc.)
+    if litert_cache.is_dir() {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", litert_cache.display());
+    }
+
+    // OUT_DIR contains our patched libLiteRtLmC.so + libGemmaModelConstraintProvider.so.
+    // This path is absolute and correct for the machine running this build.
+    println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
+    println!("cargo:rustc-link-search=native={}", out_dir.display());
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -127,6 +140,10 @@ fn cargo_home() -> std::path::PathBuf {
         .unwrap_or_else(|_| {
             std::path::PathBuf::from(std::env::var("HOME").expect("HOME not set")).join(".cargo")
         })
+}
+
+fn file_size(p: &std::path::Path) -> u64 {
+    std::fs::metadata(p).map(|m| m.len()).unwrap_or(0)
 }
 
 fn download_file(dest: &std::path::Path, url: &str) {
@@ -155,7 +172,7 @@ fn patch_runpath(so: &std::path::Path) {
             return;
         }
         Err(e) => panic!("patchelf --print-rpath: {e}"),
-        Ok(out) if out.stdout.starts_with(b"$ORIGIN") => return, // already patched
+        Ok(out) if out.stdout.starts_with(b"$ORIGIN") => return,
         Ok(_) => {}
     }
     let st = std::process::Command::new("patchelf")
