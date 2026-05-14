@@ -23,6 +23,7 @@ RUN apt-get update && export DEBIAN_FRONTEND=noninteractive && \
         git \
         unzip \
         jq \
+        patchelf \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Node.js 22 ─────────────────────────────────────────────────────────────
@@ -47,14 +48,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
 
 ENV PATH="/home/vscode/.cargo/bin:${PATH}"
 
-# ── LiteRT runtime library path ────────────────────────────────────────────
-# litert-sys and litert-lm-sys download prebuilt .so files into the user
-# cache at build time. libLiteRtLmC.so has a hard NEEDED entry for
-# libGemmaModelConstraintProvider.so whose RUNPATH points to Bazel build
-# tree paths that don't exist outside Google's build environment. Setting
-# LD_LIBRARY_PATH to the litert-sys cache dir lets the dynamic linker
-# resolve it at runtime without patching the upstream libraries.
-ENV LD_LIBRARY_PATH="/home/vscode/.cache/litert-sys/v0.10.2/x86_64-unknown-linux-gnu:${LD_LIBRARY_PATH:-}"
+
 
 # ── Android SDK ────────────────────────────────────────────────────────────
 # Required for `tauri android dev` / `tauri android build`.

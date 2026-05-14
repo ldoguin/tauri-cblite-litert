@@ -23,5 +23,7 @@
 	// absent from the litert-sys 0.2.1 Linux prebuilt list. It must be
 	// fetched from the LiteRT-LM LFS release and placed in the litert-sys
 	// cache dir so LD_LIBRARY_PATH (set in the Dockerfile) can find it.
-	"postCreateCommand": "bash .devcontainer/fetch-litert-extras.sh"
+	// pnpm install runs first so the Rust build downloads libLiteRtLmC.so
+	// into the cache before the script patches its RUNPATH.
+	"postCreateCommand": "pnpm install && bash .devcontainer/fetch-litert-extras.sh"
 }
