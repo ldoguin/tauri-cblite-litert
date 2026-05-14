@@ -1,12 +1,15 @@
 /**
  * modelCache.ts — download, cache, and manage LLM/embedding/Whisper model files.
  *
- * On web: models are stored in the Cache API (origin-private, survives page reload).
- * On Tauri: models are stored on the filesystem; the path is returned directly.
+ * On web:   models are stored in the Cache API (origin-private, survives reload).
+ * On Tauri: models are downloaded via a Rust command to <appLocalDataDir>/models/
+ *           and progress is delivered via `model-download-progress` Tauri events.
  *
- * The registry (name → CachedModel) is persisted in localStorage so the UI
- * can show cached models without re-fetching headers.
+ * The registry (id → CachedModel) is persisted in localStorage so the UI can
+ * show cached state without re-checking the filesystem on every render.
  */
+
+import { isTauri } from "./db";
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -19,6 +22,8 @@ export type ModelEntry = {
   kind: ModelKind;
   /** Remote URL to download from */
   url: string;
+  /** Filename used when saving to disk on Tauri (derived from url if omitted) */
+  fileName?: string;
   /** Approximate size in bytes (shown before download) */
   sizeBytes: number;
   /** Context window token limit (LLM only) */
@@ -126,11 +131,32 @@ export function getCachedModels(): CachedModel[] {
   }));
 }
 
-/** Check which models are actually present in the Cache API and sync registry. */
+/** Check which models are actually present and sync the registry. */
 export async function syncCacheRegistry(): Promise<CachedModel[]> {
   const registry = loadRegistry();
 
-  if ("caches" in window) {
+  if (isTauri()) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    for (const entry of MODEL_CATALOGUE) {
+      const fileName = modelFileName(entry);
+      const path = await invoke<string | null>("get_model_path", { fileName }).catch(() => null);
+      if (path) {
+        if (!registry[entry.id]?.cached) {
+          registry[entry.id] = {
+            ...entry,
+            cached: true,
+            cachedBytes: entry.sizeBytes,
+            cachedAt: registry[entry.id]?.cachedAt ?? new Date().toISOString(),
+          };
+        }
+      } else {
+        if (registry[entry.id]?.cached) {
+          registry[entry.id] = { ...entry, cached: false, cachedBytes: 0 };
+        }
+      }
+    }
+    saveRegistry(registry);
+  } else if ("caches" in window) {
     const cache = await caches.open(CACHE_NAME);
     const keys = await cache.keys();
     const cachedUrls = new Set(keys.map((r) => r.url));
@@ -138,8 +164,6 @@ export async function syncCacheRegistry(): Promise<CachedModel[]> {
     for (const entry of MODEL_CATALOGUE) {
       if (cachedUrls.has(entry.url)) {
         if (!registry[entry.id]?.cached) {
-          // Try to read the actual stored size from the content-length header
-          // rather than using the catalogue's approximate sizeBytes.
           let cachedBytes = entry.sizeBytes;
           try {
             const resp = await cache.match(entry.url);
@@ -167,12 +191,26 @@ export async function syncCacheRegistry(): Promise<CachedModel[]> {
 
 // ── Download ───────────────────────────────────────────────────────────────
 
+// Active downloads: AbortController for web, no-op sentinel for Tauri
+// (Tauri cancellation is handled via the cancel_model_download command).
 const activeDownloads = new Map<string, AbortController>();
 
+/** Derive the on-disk filename for a model entry. */
+function modelFileName(entry: ModelEntry): string {
+  return entry.fileName ?? entry.url.split("/").pop() ?? `${entry.id}.bin`;
+}
+
 /**
- * Download a model file and store it in the Cache API.
- * Calls `onProgress` with live byte counts.
- * Returns the URL that can be passed to loadWebLlm / initEmbeddings.
+ * Download a model file and persist it.
+ *
+ * On Tauri: invokes the Rust `download_model` command which streams the file
+ *   to <appLocalDataDir>/models/ and emits `model-download-progress` events.
+ *   `onProgress` is wired to those events.
+ *
+ * On web: streams via fetch into the Cache API with a TransformStream so
+ *   only a small sliding window of chunks is held in memory at any time.
+ *
+ * Returns the path/URL to pass to loadWebLlm / initEmbeddings.
  */
 export async function downloadModel(
   modelId: string,
@@ -182,12 +220,16 @@ export async function downloadModel(
   const entry = MODEL_CATALOGUE.find((m) => m.id === modelId);
   if (!entry) throw new Error(`Unknown model: ${modelId}`);
 
-  // Abort any existing download for this model
-  activeDownloads.get(modelId)?.abort();
+  // Cancel any existing download for this model.
+  cancelDownload(modelId);
+
+  if (isTauri()) {
+    return downloadModelTauri(entry, onProgress, signal);
+  }
+
+  // ── Web: Cache API path ───────────────────────────────────────────────────
   const controller = new AbortController();
   activeDownloads.set(modelId, controller);
-
-  // Combine external signal with our own controller
   signal?.addEventListener("abort", () => controller.abort(), { once: true });
 
   try {
@@ -197,12 +239,9 @@ export async function downloadModel(
     const contentLength = Number(response.headers.get("content-length") ?? entry.sizeBytes);
     if (!response.body) throw new Error(`No response body for ${entry.url}`);
 
-    // Stream through a TransformStream to track progress without buffering the
-    // entire file in memory. The readable side is passed directly to cache.put()
-    // so only a small sliding window of chunks is held at any time.
     let received = 0;
     const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
+      transform(chunk, ctrl) {
         received += chunk.byteLength;
         onProgress({
           modelId,
@@ -210,20 +249,14 @@ export async function downloadModel(
           totalBytes: contentLength,
           fraction: contentLength > 0 ? received / contentLength : 0,
         });
-        controller.enqueue(chunk);
+        ctrl.enqueue(chunk);
       },
     });
 
-    // Pipe the fetch body through the progress transform.
-    // Capture the promise so we can detect network drops — a silently swallowed
-    // pipeTo error would otherwise store a truncated file as cached:true.
     const pipePromise = response.body.pipeTo(writable);
 
     if ("caches" in window) {
       const cache = await caches.open(CACHE_NAME);
-      // Await both cache.put (which consumes the readable) and the pipe
-      // (which surfaces network errors). If either rejects, the registry
-      // is never updated and the truncated cache entry is deleted.
       try {
         await Promise.all([
           cache.put(entry.url, new Response(readable, {
@@ -232,52 +265,106 @@ export async function downloadModel(
           pipePromise,
         ]);
       } catch (err) {
-        // Clean up any partial cache entry so the model doesn't appear cached.
         await cache.delete(entry.url).catch(() => {});
         throw err;
       }
     } else {
-      // No Cache API — drain the stream so the progress callbacks fire,
-      // but do NOT mark the model as cached since nothing was persisted.
       const reader = readable.getReader();
       while (!(await reader.read()).done) { /* drain */ }
-      await pipePromise.catch(() => {}); // surface network errors as thrown
-      console.warn(`[modelCache] Cache API unavailable — model "${modelId}" was not persisted.`);
+      await pipePromise;
+      console.warn(`[modelCache] Cache API unavailable — "${modelId}" not persisted.`);
       return entry.url;
     }
 
-    // Update registry — only reached when Cache API is available.
     const registry = loadRegistry();
     registry[modelId] = {
-      ...entry,
-      cached: true,
-      cachedBytes: received,
+      ...entry, cached: true, cachedBytes: received,
       cachedAt: new Date().toISOString(),
     };
     saveRegistry(registry);
-
     return entry.url;
   } finally {
     activeDownloads.delete(modelId);
   }
 }
 
-/** Cancel an in-progress download. */
-export function cancelDownload(modelId: string): void {
-  activeDownloads.get(modelId)?.abort();
-  activeDownloads.delete(modelId);
+/** Tauri download path — delegates to the Rust command and bridges events → onProgress. */
+async function downloadModelTauri(
+  entry: ModelEntry,
+  onProgress: (p: DownloadProgress) => void,
+  signal?: AbortSignal,
+): Promise<string> {
+  const { invoke } = await import("@tauri-apps/api/core");
+  const { listen } = await import("@tauri-apps/api/event");
+
+  // Listen to progress events from the Rust command.
+  const unlisten = await listen<{
+    modelId: string; receivedBytes: number; totalBytes: number; fraction: number;
+  }>("model-download-progress", (ev) => {
+    if (ev.payload.modelId !== entry.id) return;
+    onProgress({
+      modelId: entry.id,
+      receivedBytes: ev.payload.receivedBytes,
+      totalBytes: ev.payload.totalBytes,
+      fraction: ev.payload.fraction,
+    });
+  });
+
+  // Wire external abort signal to the Rust cancel command.
+  const abortHandler = async () => {
+    await invoke("cancel_model_download", { modelId: entry.id }).catch(() => {});
+  };
+  signal?.addEventListener("abort", abortHandler, { once: true });
+
+  try {
+    const filePath: string = await invoke("download_model", {
+      modelId: entry.id,
+      url: entry.url,
+      fileName: modelFileName(entry),
+    });
+
+    const registry = loadRegistry();
+    registry[entry.id] = {
+      ...entry, cached: true, cachedBytes: entry.sizeBytes,
+      cachedAt: new Date().toISOString(),
+    };
+    saveRegistry(registry);
+
+    return filePath;
+  } catch (err) {
+    if (String(err) === "cancelled") throw new DOMException("Download cancelled", "AbortError");
+    throw err;
+  } finally {
+    unlisten();
+    signal?.removeEventListener("abort", abortHandler);
+  }
 }
 
-/** Remove a cached model from the Cache API and registry. */
+/** Cancel an in-progress download. */
+export function cancelDownload(modelId: string): void {
+  // Web path
+  activeDownloads.get(modelId)?.abort();
+  activeDownloads.delete(modelId);
+  // Tauri path — fire-and-forget
+  if (isTauri()) {
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("cancel_model_download", { modelId }))
+      .catch(() => {});
+  }
+}
+
+/** Remove a cached model from storage and the registry. */
 export async function deleteModel(modelId: string): Promise<void> {
   const entry = MODEL_CATALOGUE.find((m) => m.id === modelId);
   if (!entry) return;
 
-  // Cancel any in-progress download first so it can't re-add the model to
-  // the Cache API after we delete it.
+  // Cancel any in-progress download first.
   cancelDownload(modelId);
 
-  if ("caches" in window) {
+  if (isTauri()) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("delete_model_file", { fileName: modelFileName(entry) }).catch(() => {});
+  } else if ("caches" in window) {
     const cache = await caches.open(CACHE_NAME);
     await cache.delete(entry.url);
   }

@@ -17,7 +17,7 @@ import type {
 } from "./types";
 import { DEFAULT_MODEL_CONFIG } from "./types";
 
-function isTauri(): boolean {
+export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
@@ -109,7 +109,13 @@ async function runMigrations(): Promise<void> {
     currentVersion = typeof doc?.version === "number" ? doc.version : 0;
   } else {
     const { getDocument } = await import("tauri-plugin-cblite");
-    const doc = await getDocument(COL_CONFIG, SCHEMA_VERSION_DOC) as { version?: number } | null;
+    // CouchbaseLite returns a "not found" error for missing documents rather
+    // than null — treat it as version 0 (fresh database).
+    const doc = await getDocument(COL_CONFIG, SCHEMA_VERSION_DOC)
+      .catch((e: unknown) => {
+        if (String(e).toLowerCase().includes("not found")) return null;
+        throw e;
+      }) as { version?: number } | null;
     currentVersion = doc?.version ?? 0;
   }
 
@@ -157,7 +163,11 @@ export async function loadConfig(): Promise<ModelConfig> {
     return doc ? { ...DEFAULT_MODEL_CONFIG, ...(doc as Partial<ModelConfig>) } : { ...DEFAULT_MODEL_CONFIG };
   }
   const { getDocument } = await import("tauri-plugin-cblite");
-  const doc = await getDocument(COL_CONFIG, "app-config");
+  const doc = await getDocument(COL_CONFIG, "app-config")
+    .catch((e: unknown) => {
+      if (String(e).toLowerCase().includes("not found")) return null;
+      throw e;
+    });
   if (!doc) return { ...DEFAULT_MODEL_CONFIG };
   const { _id: _unused, ...rest } = doc as Record<string, unknown>;
   return { ...DEFAULT_MODEL_CONFIG, ...(rest as Partial<ModelConfig>) };
@@ -200,7 +210,11 @@ export async function getConversation(id: string): Promise<Conversation | null> 
     return doc ? ({ id, ...doc } as Conversation) : null;
   }
   const { getDocument } = await import("tauri-plugin-cblite");
-  const doc = await getDocument(COL_CONVERSATIONS, id);
+  const doc = await getDocument(COL_CONVERSATIONS, id)
+    .catch((e: unknown) => {
+      if (String(e).toLowerCase().includes("not found")) return null;
+      throw e;
+    });
   return doc ? { id, ...(doc as Omit<Conversation, "id">) } : null;
 }
 
@@ -305,7 +319,11 @@ export async function deleteMessage(id: string): Promise<void> {
   }
   const { getDocument, saveDocument } = await import("tauri-plugin-cblite");
   // Cascade-delete chunk siblings before removing the parent
-  const parent = await getDocument(COL_MESSAGES, id) as { chunkIds?: string[] } | null;
+  const parent = await getDocument(COL_MESSAGES, id)
+    .catch((e: unknown) => {
+      if (String(e).toLowerCase().includes("not found")) return null;
+      throw e;
+    }) as { chunkIds?: string[] } | null;
   if (parent?.chunkIds?.length) {
     await Promise.all(
       parent.chunkIds.map((cid) => saveDocument(COL_MESSAGES, cid, { _deleted: true })),
