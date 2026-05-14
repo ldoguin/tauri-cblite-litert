@@ -1,0 +1,4 @@
+# Ignore LLVM coverage profiling files written by the running binary.
+# Without this, default.profraw triggers an infinite rebuild loop in tauri dev.
+*.profraw
+*.profdata
