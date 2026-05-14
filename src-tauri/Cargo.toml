@@ -18,15 +18,22 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = [] }
-tauri-plugin-shell = "2"
+tauri-plugin-os = "2"
 tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "135ccc2", features = ["native-cbl"] }
-tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert" }
+tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "d2ae6e5" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 [profile.release]
 opt-level = "s"   # optimise for binary size
-strip = true
+# strip = false so crash reports retain symbol names; use the dist profile for
+# stripped distribution builds where binary size matters more than debuggability.
+strip = false
 lto = true
 codegen-units = 1
 panic = "abort"
+
+# Use `cargo build --profile dist` for stripped distribution artifacts.
+[profile.dist]
+inherits = "release"
+strip = true

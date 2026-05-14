@@ -8,8 +8,31 @@ export const REPLICATION_STATUS_EVENT = "cblite://replication-status";
 /**
  * True when running on Android/iOS. On mobile, plugin events come through
  * Tauri Channels (registerListener) rather than the global event bus (listen).
+ *
+ * Uses @tauri-apps/plugin-os for reliable platform detection instead of
+ * user-agent sniffing, which is unreliable on desktop browsers with mobile
+ * emulation enabled.
  */
+let _isMobileCache: boolean | null = null;
+
+async function isMobileAsync(): Promise<boolean> {
+  if (_isMobileCache !== null) return _isMobileCache;
+  try {
+    const { platform } = await import("@tauri-apps/plugin-os");
+    const p = await platform();
+    _isMobileCache = p === "android" || p === "ios";
+  } catch {
+    // plugin-os not available — fall back to UA sniff as last resort
+    _isMobileCache = /android|iphone|ipad|ipod/i.test(navigator.userAgent);
+  }
+  return _isMobileCache;
+}
+
+// Synchronous helper used in non-async contexts; resolved on first async call.
 function isMobile(): boolean {
+  if (_isMobileCache !== null) return _isMobileCache;
+  // Warm the cache asynchronously; first call before resolution falls back to UA.
+  isMobileAsync().catch(() => {});
   return /android|iphone|ipad|ipod/i.test(navigator.userAgent);
 }
 

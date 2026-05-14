@@ -98,14 +98,27 @@ const INSTRUCTIONS: Record<
   },
 };
 
+const DISMISSED_KEY = "rag-chatbot:webgpu-banner-dismissed";
+
 export function WebGpuBanner() {
   const [status, setStatus] = useState<GpuStatus>("checking");
-  const [dismissed, setDismissed] = useState(false);
+  const [dismissed, setDismissed] = useState(
+    () => sessionStorage.getItem(DISMISSED_KEY) === "1",
+  );
+
+  const dismiss = () => {
+    sessionStorage.setItem(DISMISSED_KEY, "1");
+    setDismissed(true);
+  };
 
   useEffect(() => {
     // Only show on web — Tauri uses native GPU access
     if ("__TAURI_INTERNALS__" in window) { setStatus("supported"); return; }
-    detectWebGpu().then(setStatus);
+    let cancelled = false;
+    detectWebGpu().then((s) => { if (!cancelled) setStatus(s); }).catch(() => {
+      if (!cancelled) setStatus("no-api");
+    });
+    return () => { cancelled = true; };
   }, []);
 
   if (status === "checking" || status === "supported" || dismissed) return null;
@@ -130,8 +143,8 @@ export function WebGpuBanner() {
               : "WebGPU is enabled but your GPU could not be initialised. LLM inference will fall back to CPU (Wasm), which is significantly slower."}
           </p>
           <ol className="webgpu-steps">
-            {info.steps.map((s, i) => (
-              <li key={i}>
+            {info.steps.map((s) => (
+              <li key={s}>
                 {info.flag && s.includes(info.flag.split("/")[0])
                   ? <>{s.split(info.flag)[0]}<a href={info.flag} target="_blank" rel="noreferrer">{info.flag}</a>{s.split(info.flag)[1]}</>
                   : s}
@@ -139,7 +152,7 @@ export function WebGpuBanner() {
             ))}
           </ol>
         </div>
-        <button className="webgpu-dismiss" onClick={() => setDismissed(true)} title="Dismiss">✕</button>
+        <button className="webgpu-dismiss" onClick={dismiss} title="Dismiss" aria-label="Dismiss WebGPU warning">✕</button>
       </div>
     </div>
   );

@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://huggingface.co https://storage.googleapis.com https://en.wikipedia.org https://api.duckduckgo.com https://cdn.jsdelivr.net; worker-src 'self' blob:; font-src 'self' data:"
     }
   },
   "bundle": {
@@ -34,6 +34,13 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "iOS": {
+      "developmentTeam": "",
+      "minimumSystemVersion": "16.0"
+    },
+    "android": {
+      "minSdkVersion": 24
+    }
   }
 }

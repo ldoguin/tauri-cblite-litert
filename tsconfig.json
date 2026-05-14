@@ -16,5 +16,5 @@
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true
   },
-  "include": ["src"]
+  "include": ["src", "packages/tauri-plugin-cblite", "packages/tauri-plugin-litert-api/src"]
 }

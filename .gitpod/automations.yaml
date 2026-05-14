@@ -1,7 +1,13 @@
+tasks:
+  install-deps:
+    name: Install dependencies
+    description: Install Node.js dependencies on workspace start
+    command: cd /workspaces/tauri-cblite-litert && pnpm install
+
 services:
   web-dev:
     name: Vite dev server
     description: React frontend on port 1420
     commands:
-      start: cd /workspaces/tauri-cblite-litert && pnpm dev --host 0.0.0.0
+      start: cd /workspaces/tauri-cblite-litert && pnpm install && pnpm dev --host 0.0.0.0
       ready: curl -sf http://localhost:1420

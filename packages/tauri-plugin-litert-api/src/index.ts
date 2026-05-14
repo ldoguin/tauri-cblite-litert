@@ -86,6 +86,8 @@ export interface GenerateInput {
   prompt: string;
   sampler?: SamplerOptions;
   systemInstruction?: string;
+  /** Base64-encoded image to pass to multimodal models (optional). */
+  image?: string;
 }
 
 export interface GenerateOutput {
@@ -236,9 +238,16 @@ async function webRunInference(input: InferenceInput): Promise<InferenceOutput> 
   const { Tensor } = await getLiteRtCore();
 
   const info = record.info;
+  // Input dtype is inferred from the model's input details when available.
+  // BERT-family models use int32 token IDs; most other models use float32.
+  const inputDetails = record.model.getInputDetails() as Array<{ shape: number[]; dtype?: string }>;
   const tensors = input.inputs.map((data, i) => {
     const shape = info.inputShapes[i] ?? [data.length];
-    return new Tensor(new Float32Array(data), shape);
+    const dtype = inputDetails[i]?.dtype ?? "float32";
+    const typedData = dtype === "int32"
+      ? new Int32Array(data)
+      : new Float32Array(data);
+    return new Tensor(typedData, shape);
   });
 
   const t0 = performance.now();
