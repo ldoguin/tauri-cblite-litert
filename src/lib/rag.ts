@@ -13,7 +13,7 @@
  */
 
 import { runInference } from "tauri-plugin-litert-api";
-import { listKnowledgeChunks, listEmbeddedMessages } from "./db";
+import { listKnowledgeChunks, listEmbeddedMessages, getRagPoolVersion } from "./db";
 
 
 // ── Embedding backend state ────────────────────────────────────────────────
@@ -33,6 +33,13 @@ let activeBackend: EmbeddingBackend = "bow";
 let useModel: UseModel | null = null;
 let initPromise: Promise<EmbeddingStatus> | null = null;
 let liteRtLoaded = false; // guard against calling loadLiteRt() more than once
+// Track the model URL that produced the current vectors so we can detect
+// backend switches and warn that existing embeddings are stale.
+let _activeModelUrl: string | undefined;
+
+// Compiled LiteRT model for the web build (@litertjs/core)
+type CompiledModel = { run(inputs: Record<string, unknown>): Promise<Record<string, unknown>> };
+let webLiteRtModel: CompiledModel | null = null;
 
 // ── Initialisation ─────────────────────────────────────────────────────────
 
@@ -42,11 +49,37 @@ let liteRtLoaded = false; // guard against calling loadLiteRt() more than once
  * no JS-side init needed. On web, tries LiteRT → USE → BoW in order.
  *
  * Call once at app startup. Re-call with a new URL to switch models.
+ * Returns `embeddingBackendChanged: true` when the active backend or model
+ * URL changed — callers should prompt the user to re-embed all content.
  */
 export function initEmbeddings(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
-  // Re-init only when a new model URL is explicitly provided
-  if (initPromise && !liteRtModelUrl) return initPromise;
-  initPromise = _init(liteRtModelUrl);
+  // Return cached promise only when no URL is given AND the backend hasn't
+  // changed — passing undefined after a LiteRT load must re-init to USE/BoW.
+  if (initPromise && liteRtModelUrl === undefined && activeBackend !== "litert") {
+    return initPromise;
+  }
+  // Also deduplicate identical LiteRT URL re-requests
+  if (initPromise && liteRtModelUrl !== undefined && activeBackend === "litert" && liteRtModelUrl === _activeModelUrl) {
+    return initPromise;
+  }
+  const previousBackend = activeBackend;
+  const previousModelUrl = _activeModelUrl;
+  initPromise = _init(liteRtModelUrl).then((status) => {
+    // Warn when the backend or model changed — existing stored vectors are
+    // incompatible with the new model and retrieval quality will degrade.
+    const backendChanged = previousBackend !== activeBackend;
+    const urlChanged = status.backend === "litert" && previousModelUrl !== undefined && previousModelUrl !== liteRtModelUrl;
+    if (backendChanged || urlChanged) {
+      console.warn(
+        `[rag] Embedding backend changed from "${previousBackend}" to "${activeBackend}". ` +
+        "Stored vectors are stale — use Re-embed All to rebuild the index.",
+      );
+    }
+    return status;
+  }).catch((err) => {
+    initPromise = null;
+    throw err;
+  });
   return initPromise;
 }
 
@@ -54,6 +87,7 @@ async function _init(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
   // On Tauri the plugin owns the LiteRT runtime — no JS init needed.
   if (isTauri()) {
     activeBackend = "litert";
+    _activeModelUrl = liteRtModelUrl;
     return { backend: "litert", modelUrl: liteRtModelUrl ?? "" };
   }
 
@@ -62,11 +96,24 @@ async function _init(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
     try {
       const { loadLiteRt, loadAndCompile } = await import("@litertjs/core");
       if (!liteRtLoaded) {
-        await loadLiteRt("https://cdn.jsdelivr.net/npm/@litertjs/core/wasm/");
-        liteRtLoaded = true;
+        try {
+          await loadLiteRt("https://cdn.jsdelivr.net/npm/@litertjs/core/wasm/");
+          liteRtLoaded = true;
+        } catch (err) {
+          // Reset flag so a subsequent initEmbeddings() call can retry
+          // (e.g. after a StrictMode remount where the WASM may have been GC'd).
+          liteRtLoaded = false;
+          throw err;
+        }
       }
-      await loadAndCompile(liteRtModelUrl, { accelerator: "wasm" });
+      // Release the previous model's WASM heap allocation before loading a new one.
+      if (webLiteRtModel) {
+        try { (webLiteRtModel as unknown as { delete?: () => void }).delete?.(); } catch { /* ignore */ }
+        webLiteRtModel = null;
+      }
+      webLiteRtModel = await loadAndCompile(liteRtModelUrl, { accelerator: "wasm" }) as CompiledModel;
       activeBackend = "litert";
+      _activeModelUrl = liteRtModelUrl;
       return { backend: "litert", modelUrl: liteRtModelUrl };
     } catch (err) {
       console.warn("[rag] LiteRT init failed, falling back to USE:", err);
@@ -80,10 +127,12 @@ async function _init(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
     const use = await import("@tensorflow-models/universal-sentence-encoder");
     useModel = (await use.load()) as UseModel;
     activeBackend = "use";
+    _activeModelUrl = undefined;
     return { backend: "use" };
   } catch (err) {
     console.warn("[rag] USE init failed, using bag-of-words fallback:", err);
     activeBackend = "bow";
+    _activeModelUrl = undefined;
     return { backend: "bow", reason: String(err) };
   }
 }
@@ -109,14 +158,29 @@ export async function embed(
   if (isTauri() && liteRtModelId) {
     return embedWithLiteRtPlugin(text, liteRtModelId);
   }
+  if (activeBackend === "litert" && webLiteRtModel) {
+    return embedWithWebLiteRt(text, webLiteRtModel);
+  }
   if (activeBackend === "use" && useModel) {
     return embedWithUse(text);
   }
   return bowEmbed(text);
 }
 
+async function embedWithWebLiteRt(text: string, model: CompiledModel): Promise<number[]> {
+  const { input_word_ids, input_mask, input_type_ids } = await tokeniseBert(text);
+  const outputs = await model.run({
+    input_word_ids: new Int32Array(input_word_ids),
+    input_mask:     new Int32Array(input_mask),
+    input_type_ids: new Int32Array(input_type_ids),
+  });
+  // The output tensor name varies by model export; try common names
+  const raw = (outputs["output_0"] ?? outputs["embeddings"] ?? Object.values(outputs)[0]) as Float32Array | number[];
+  return l2Normalise(Array.from(raw));
+}
+
 async function embedWithLiteRtPlugin(text: string, modelId: string): Promise<number[]> {
-  const { input_word_ids, input_mask, input_type_ids } = tokeniseBert(text);
+  const { input_word_ids, input_mask, input_type_ids } = await tokeniseBert(text);
   // runInference accepts one flat array per input tensor — BERT needs three.
   const { outputs } = await runInference({
     modelId,
@@ -132,38 +196,176 @@ async function embedWithUse(text: string): Promise<number[]> {
   return l2Normalise(embeddings.arraySync()[0]);
 }
 
-// ── Tokeniser ──────────────────────────────────────────────────────────────
+// ── WordPiece tokeniser ────────────────────────────────────────────────────
+//
+// Implements the standard BERT WordPiece algorithm against the
+// bert-base-uncased vocabulary (30,522 tokens). The vocab is fetched once
+// from the HuggingFace CDN and cached in memory for the lifetime of the page.
+//
+// Special tokens match bert-base-uncased:
+//   [PAD]=0  [UNK]=100  [CLS]=101  [SEP]=102  [MASK]=103
+//
+// The MediaPipe bert_embedder.tflite uses this exact vocabulary, so token IDs
+// produced here will match what the model expects.
 
 const SEQ_LEN = 128;
+const CLS_ID = 101, SEP_ID = 102, PAD_ID = 0, UNK_ID = 100;
+
+// Bundled vocab shipped with the app — no network required on first load.
+const VOCAB_LOCAL_URL = "/bert-vocab.txt";
+// CDN fallback used only when the bundled asset is unavailable (e.g. custom
+// deployments that strip public/ assets).
+const VOCAB_CDN_URL =
+  "https://huggingface.co/bert-base-uncased/resolve/main/vocab.txt";
+
+let _vocab: Map<string, number> | null = null;
+let _vocabPromise: Promise<Map<string, number>> | null = null;
+
+async function loadVocab(): Promise<Map<string, number>> {
+  if (_vocab) return _vocab;
+  if (_vocabPromise) return _vocabPromise;
+
+  _vocabPromise = (async () => {
+    let text: string | null = null;
+
+    // 1. Try the bundled asset — works offline, no CDN dependency.
+    try {
+      const res = await fetch(VOCAB_LOCAL_URL);
+      if (res.ok) text = await res.text();
+    } catch { /* bundled asset unavailable — fall through */ }
+
+    // 2. CDN fallback with Cache API caching to avoid repeated downloads.
+    if (!text) {
+      if (typeof caches !== "undefined") {
+        try {
+          const cache = await caches.open("bert-vocab-v1");
+          const cached = await cache.match(VOCAB_CDN_URL);
+          if (cached) {
+            text = await cached.text();
+          } else {
+            const res = await fetch(VOCAB_CDN_URL);
+            if (res.ok) {
+              text = await res.text();
+              try {
+                await cache.put(VOCAB_CDN_URL, new Response(text, {
+                  headers: { "content-type": "text/plain" },
+                }));
+              } catch { /* cache quota exceeded — continue with in-memory text */ }
+            }
+          }
+        } catch { /* Cache API unavailable — fall through to direct fetch */ }
+      }
+      if (!text) {
+        const res = await fetch(VOCAB_CDN_URL);
+        if (!res.ok) throw new Error(`Failed to fetch BERT vocab: ${res.status}`);
+        text = await res.text();
+      }
+    }
+
+    const map = new Map<string, number>();
+    text.split("\n").forEach((token, idx) => {
+      const t = token.trim();
+      if (t) map.set(t, idx);
+    });
+    _vocab = map;
+    return map;
+  })().catch((err) => {
+    // Clear so callers can retry after a transient network failure
+    _vocabPromise = null;
+    throw err;
+  });
+
+  return _vocabPromise;
+}
+
+/**
+ * WordPiece tokenisation matching bert-base-uncased.
+ * Falls back to character-level [UNK] if a subword is not in the vocabulary.
+ */
+function wordPieceTokenize(word: string, vocab: Map<string, number>): number[] {
+  if (word.length > 200) return [UNK_ID]; // guard against pathological input
+
+  const ids: number[] = [];
+  let start = 0;
+  while (start < word.length) {
+    let end = word.length;
+    let found = false;
+    while (start < end) {
+      const substr = (start === 0 ? "" : "##") + word.slice(start, end);
+      if (vocab.has(substr)) {
+        ids.push(vocab.get(substr)!);
+        start = end;
+        found = true;
+        break;
+      }
+      end--;
+    }
+    if (!found) {
+      ids.push(UNK_ID);
+      start++;
+    }
+  }
+  return ids.length > 0 ? ids : [UNK_ID];
+}
 
 /**
  * Produces the three int32 input arrays expected by BERT-family .tflite
  * embedding models (e.g. MediaPipe bert_embedder):
- *   input_word_ids  — djb2-hashed token IDs, [CLS] prepended, [SEP] appended
+ *   input_word_ids  — real WordPiece token IDs, [CLS] prepended, [SEP] appended
  *   input_mask      — 1 for real tokens, 0 for padding
  *   input_type_ids  — all zeros (single-segment)
  *
- * djb2 hashing matches the plugin example's tokeniser. For production,
- * replace with a proper WordPiece tokeniser matching the model's vocabulary.
+ * Loads the bert-base-uncased vocabulary on first call (cached in memory and
+ * Cache API). Falls back to the djb2 hash approach if the vocab cannot be
+ * fetched (e.g. offline with no cache).
  */
-function tokeniseBert(text: string): {
+async function tokeniseBert(text: string): Promise<{
   input_word_ids: number[];
   input_mask: number[];
   input_type_ids: number[];
-} {
-  const CLS = 101, SEP = 102, PAD = 0;
-  const words = text.toLowerCase().split(/\s+/).slice(0, SEQ_LEN - 2);
-
-  const ids: number[] = [CLS];
-  for (const w of words) {
-    let h = 5381;
-    for (let i = 0; i < w.length; i++) h = ((h << 5) + h) ^ w.charCodeAt(i);
-    ids.push((Math.abs(h) % 29998) + 1); // keep away from 0/CLS/SEP
+}> {
+  let vocab: Map<string, number> | null = null;
+  try {
+    vocab = await loadVocab();
+  } catch {
+    // Network unavailable and no cache — fall back to djb2 hashing
   }
-  ids.push(SEP);
+
+  // Normalise: lowercase, strip accents, split on whitespace/punctuation
+  const cleaned = text
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "") // strip combining diacritics
+    .replace(/[^a-z0-9\s]/g, " ")
+    .trim();
+
+  const words = cleaned.split(/\s+/).filter(Boolean);
+
+  const ids: number[] = [CLS_ID];
+
+  if (vocab) {
+    for (const word of words) {
+      if (ids.length >= SEQ_LEN - 1) break; // leave room for [SEP]
+      const subIds = wordPieceTokenize(word, vocab);
+      for (const id of subIds) {
+        if (ids.length >= SEQ_LEN - 1) break;
+        ids.push(id);
+      }
+    }
+  } else {
+    // djb2 fallback when vocab is unavailable.
+    // Start at 1000 to avoid the reserved BERT special token range (0–999).
+    for (const w of words.slice(0, SEQ_LEN - 2)) {
+      let h = 5381;
+      for (let i = 0; i < w.length; i++) h = ((h << 5) + h) ^ w.charCodeAt(i);
+      ids.push((Math.abs(h) % 29522) + 1000); // 1000–30521, avoids 0–999
+    }
+  }
+
+  ids.push(SEP_ID);
 
   const mask = new Array<number>(SEQ_LEN).fill(0);
-  const wordIds = new Array<number>(SEQ_LEN).fill(PAD);
+  const wordIds = new Array<number>(SEQ_LEN).fill(PAD_ID);
   for (let i = 0; i < ids.length && i < SEQ_LEN; i++) {
     wordIds[i] = ids[i];
     mask[i] = 1;
@@ -218,17 +420,22 @@ function isTauri(): boolean {
 
 // ── Chunking ───────────────────────────────────────────────────────────────
 
-const CHUNK_SIZE = 400;
-const CHUNK_OVERLAP = 80;
+export const DEFAULT_CHUNK_SIZE = 400;
+export const DEFAULT_CHUNK_OVERLAP = 80;
 
-export function splitIntoChunks(text: string): string[] {
+export function splitIntoChunks(
+  text: string,
+  chunkSize = DEFAULT_CHUNK_SIZE,
+  chunkOverlap = DEFAULT_CHUNK_OVERLAP,
+): string[] {
+  const overlap = Math.min(chunkOverlap, Math.floor(chunkSize / 2));
   const chunks: string[] = [];
   let start = 0;
   while (start < text.length) {
-    const end = Math.min(start + CHUNK_SIZE, text.length);
+    const end = Math.min(start + chunkSize, text.length);
     chunks.push(text.slice(start, end).trim());
     if (end === text.length) break;
-    start += CHUNK_SIZE - CHUNK_OVERLAP;
+    start += chunkSize - overlap;
   }
   return chunks.filter((c) => c.length > 20);
 }
@@ -251,81 +458,287 @@ export interface RetrievedChunk {
   conversationId?: string;
 }
 
+// ── BM25 ───────────────────────────────────────────────────────────────────
+//
+// Okapi BM25 scoring for a single document against a query.
+// k1 and b are standard defaults from the original paper.
+
+const BM25_K1 = 1.5;
+const BM25_B  = 0.75;
+
+function termFrequencies(text: string): Map<string, number> {
+  const tf = new Map<string, number>();
+  for (const w of text.toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/)) {
+    if (w.length > 1) tf.set(w, (tf.get(w) ?? 0) + 1);
+  }
+  return tf;
+}
+
+function bm25Score(
+  queryTerms: string[],
+  docTf: Map<string, number>,
+  docLen: number,
+  avgDocLen: number,
+  idf: Map<string, number>,
+): number {
+  let score = 0;
+  for (const term of queryTerms) {
+    const tf = docTf.get(term) ?? 0;
+    if (tf === 0) continue;
+    const idfVal = idf.get(term) ?? 0;
+    score += idfVal * (tf * (BM25_K1 + 1)) /
+      (tf + BM25_K1 * (1 - BM25_B + BM25_B * (docLen / avgDocLen)));
+  }
+  return score;
+}
+
+function buildIdf(queryTerms: string[], corpus: Map<string, number>[]): Map<string, number> {
+  const N = corpus.length;
+  const idf = new Map<string, number>();
+  for (const term of queryTerms) {
+    const df = corpus.filter((tf) => tf.has(term)).length;
+    // Smoothed IDF: ln((N - df + 0.5) / (df + 0.5) + 1)
+    idf.set(term, Math.log((N - df + 0.5) / (df + 0.5) + 1));
+  }
+  return idf;
+}
+
+// ── Reciprocal Rank Fusion ─────────────────────────────────────────────────
+//
+// Combines two ranked lists without requiring score normalisation.
+// RRF(d) = Σ 1 / (k + rank_i(d))  where k=60 is the standard constant.
+
+const RRF_K = 60;
+
+function rrfFuse(
+  vectorRanked: RetrievedChunk[],
+  bm25Ranked:   RetrievedChunk[],
+  bm25Weight: number, // 0 = pure vector, 1 = pure BM25
+): RetrievedChunk[] {
+  const vectorWeight = 1 - bm25Weight;
+  const scores = new Map<string, number>();
+  const byId   = new Map<string, RetrievedChunk>();
+
+  vectorRanked.forEach((c, i) => {
+    scores.set(c.id, (scores.get(c.id) ?? 0) + vectorWeight / (RRF_K + i + 1));
+    byId.set(c.id, c);
+  });
+  bm25Ranked.forEach((c, i) => {
+    scores.set(c.id, (scores.get(c.id) ?? 0) + bm25Weight / (RRF_K + i + 1));
+    byId.set(c.id, c);
+  });
+
+  return Array.from(scores.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([id, score]) => ({ ...byId.get(id)!, score }));
+}
+
+// ── Candidate pool cache ───────────────────────────────────────────────────
+//
+// Fetching all chunks + messages from the DB on every retrieval call is
+// expensive when the knowledge base is large. We cache the raw DB results
+// and only re-fetch when the pool version counter (bumped by db.ts on every
+// write/delete) has changed since the last fetch.
+
+type RawPool = {
+  chunks: import("./types").KnowledgeChunk[];
+  messages: import("./types").Message[];
+};
+
+// Pre-computed TF maps are cached alongside the raw pool so BM25 scoring
+// doesn't recompute termFrequencies() for every document on every query.
+type TfCache = {
+  chunkTf: Map<string, Map<string, number>>;
+  msgTf:   Map<string, Map<string, number>>;
+};
+
+let _poolCache: RawPool | null = null;
+let _tfCache: TfCache | null = null;
+let _poolCacheVersion = -1;
+// Serialised sourceTypes used when the pool was last fetched.
+// A different sourceTypes set must bust the cache even if the DB version
+// hasn't changed — otherwise a knowledge-only fetch poisons the cache for
+// a subsequent knowledge+message fetch (and vice-versa).
+let _poolCacheSourceKey = "";
+
+function sourceKey(types: RetrievedItemType[]): string {
+  return [...types].sort().join(",");
+}
+
+async function fetchPool(
+  sourceTypes: RetrievedItemType[],
+): Promise<RawPool & TfCache> {
+  // Capture version BEFORE the async fetch so any write that races with the
+  // fetch bumps the counter and forces a re-fetch on the next call.
+  const versionAtStart = getRagPoolVersion();
+  const sk = sourceKey(sourceTypes);
+  if (_poolCache && _tfCache && versionAtStart === _poolCacheVersion && sk === _poolCacheSourceKey) {
+    return { ..._poolCache, ..._tfCache };
+  }
+
+  const [chunks, messages] = await Promise.all([
+    sourceTypes.includes("knowledge") ? listKnowledgeChunks() : Promise.resolve([]),
+    sourceTypes.includes("message")   ? listEmbeddedMessages() : Promise.resolve([]),
+  ]);
+
+  // Pre-compute TF maps once per pool refresh — O(n) amortised over all queries.
+  const chunkTf = new Map(chunks.map((c) => [c.id, termFrequencies(c.text)]));
+  const msgTf   = new Map(messages.map((m) => [m.id, termFrequencies(m.content)]));
+
+  // Only cache if no write raced with the fetch — if the version advanced,
+  // leave the cache invalid so the next call re-fetches fresh data.
+  if (getRagPoolVersion() === versionAtStart) {
+    _poolCache = { chunks, messages };
+    _tfCache   = { chunkTf, msgTf };
+    _poolCacheVersion = versionAtStart;
+    _poolCacheSourceKey = sk;
+  }
+  return { chunks, messages, chunkTf, msgTf };
+}
+
+/** Invalidate the pool cache (e.g. after a bulk re-embed completes). */
+export function invalidateRagPoolCache(): void {
+  _poolCache = null;
+  _tfCache   = null;
+  _poolCacheVersion = -1;
+  _poolCacheSourceKey = "";
+}
+
 /**
- * Retrieves the top-K items most similar to `queryEmbedding` from both:
- *   - _default.knowledge  (ingested document chunks)
- *   - _default.messages   (vectorised conversation turns)
+ * Retrieves the top-K items from both knowledge chunks and conversation
+ * messages using hybrid search: vector cosine similarity fused with BM25
+ * keyword scoring via Reciprocal Rank Fusion.
  *
  * @param queryEmbedding         Embedding of the user query
+ * @param queryText              Raw query string (for BM25)
  * @param topK                   Maximum number of results to return
- * @param threshold              Minimum cosine similarity (default 0.3)
- * @param excludeConversationId  Skip messages from this conversation (avoids
- *                               the current conversation retrieving itself)
+ * @param threshold              Minimum cosine similarity for vector candidates
+ * @param excludeConversationId  Skip messages from this conversation
+ * @param sourceTypes            Which collections to search
+ * @param bm25Weight             0 = pure vector, 1 = pure BM25 (default 0.3)
  */
 export async function retrieveTopK(
   queryEmbedding: number[],
+  queryText: string,
   topK: number,
   threshold = 0.3,
   excludeConversationId?: string,
+  sourceTypes: RetrievedItemType[] = ["knowledge", "message"],
+  bm25Weight = 0.3,
 ): Promise<RetrievedChunk[]> {
-  const [chunks, messages] = await Promise.all([
-    listKnowledgeChunks(),
-    listEmbeddedMessages(),
-  ]);
+  const { chunks, messages, chunkTf, msgTf } = await fetchPool(sourceTypes);
 
-  const candidates: RetrievedChunk[] = [];
+  // Pre-build embedding lookup maps — O(n) instead of O(n²) find() in the loop
+  const chunkEmbMap = new Map(chunks.map((c) => [c.id, c.embedding]));
+  const msgEmbMap   = new Map(messages.map((m) => [m.id, m.embedding]));
 
-  // Knowledge chunks
+  // Build candidate pool with metadata.
+  // TF maps come from the pool cache — no per-call recomputation.
+  type Candidate = RetrievedChunk & { tf: Map<string, number>; len: number };
+  const pool: Candidate[] = [];
+
   for (const c of chunks) {
-    if (!c.embedding?.length) continue;
-    const score = cosineSimilarity(queryEmbedding, c.embedding);
-    if (score < threshold) continue;
-    candidates.push({ id: c.id, source: c.source, text: c.text, score, type: "knowledge" });
+    const tf = chunkTf.get(c.id) ?? new Map<string, number>();
+    pool.push({ id: c.id, source: c.source, text: c.text, score: 0, type: "knowledge", tf, len: c.text.length });
   }
-
-  // Vectorised messages (exclude current conversation)
   for (const m of messages) {
-    if (!m.embedding?.length) continue;
+    // Always add to pool so BM25 can score un-embedded messages.
+    // The vector ranking step below skips items without an embedding.
     if (excludeConversationId && m.conversationId === excludeConversationId) continue;
-    const score = cosineSimilarity(queryEmbedding, m.embedding);
-    if (score < threshold) continue;
+    const tf = msgTf.get(m.id) ?? new Map<string, number>();
     const label = `${m.role} · ${new Date(m.createdAt).toLocaleDateString()}`;
-    candidates.push({
-      id: m.id,
-      source: label,
-      text: m.content,
-      score,
-      type: "message",
-      conversationId: m.conversationId,
+    pool.push({
+      id: m.id, source: label, text: m.content, score: 0,
+      type: "message", conversationId: m.conversationId, tf, len: m.content.length,
     });
   }
 
-  return candidates
-    .sort((a, b) => b.score - a.score)
-    .slice(0, topK);
+  if (pool.length === 0) return [];
+
+  // ── Vector ranking ──────────────────────────────────────────────────────
+  const vectorRanked: RetrievedChunk[] = [];
+  if (bm25Weight < 1) {
+    for (const c of pool) {
+      const emb = c.type === "knowledge" ? chunkEmbMap.get(c.id) : msgEmbMap.get(c.id);
+      if (!emb?.length) continue;
+      const score = cosineSimilarity(queryEmbedding, emb);
+      if (score < threshold) continue;
+      vectorRanked.push({ ...c, score });
+    }
+    vectorRanked.sort((a, b) => b.score - a.score);
+  }
+
+  // ── BM25 ranking ────────────────────────────────────────────────────────
+  const bm25Ranked: RetrievedChunk[] = [];
+  if (bm25Weight > 0) {
+    const queryTerms = Array.from(termFrequencies(queryText).keys());
+    const allTfs = pool.map((c) => c.tf);
+    const avgLen = pool.length > 0 ? pool.reduce((s, c) => s + c.len, 0) / pool.length : 1;
+    const idf = buildIdf(queryTerms, allTfs);
+
+    for (const c of pool) {
+      const score = bm25Score(queryTerms, c.tf, c.len, avgLen, idf);
+      if (score <= 0) continue;
+      bm25Ranked.push({ ...c, score });
+    }
+    bm25Ranked.sort((a, b) => b.score - a.score);
+  }
+
+  // ── Fuse and return ─────────────────────────────────────────────────────
+  const fused = bm25Weight === 0
+    ? vectorRanked
+    : bm25Weight === 1
+    ? bm25Ranked
+    : rrfFuse(vectorRanked, bm25Ranked, bm25Weight);
+
+  return fused.slice(0, topK);
 }
 
-// ── Prompt building ────────────────────────────────────────────────────────
+// ── Re-ranking ─────────────────────────────────────────────────────────────
+//
+// Lightweight lexical re-ranker applied after vector retrieval.
+// Computes term-overlap (Jaccard) between the query and each chunk, then
+// combines it with the cosine score using a weighted sum.
+// This boosts chunks that contain exact query terms without requiring a
+// second model.
 
-export function buildRagPrompt(
+function tokenise(text: string): Set<string> {
+  return new Set(
+    text.toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((w) => w.length > 2),
+  );
+}
+
+function jaccardOverlap(a: Set<string>, b: Set<string>): number {
+  if (a.size === 0 || b.size === 0) return 0;
+  let intersection = 0;
+  for (const t of a) if (b.has(t)) intersection++;
+  return intersection / (a.size + b.size - intersection);
+}
+
+/**
+ * Re-rank retrieved chunks by combining cosine similarity with lexical
+ * term overlap against the query.
+ *
+ * @param query     Original user query string
+ * @param chunks    Candidates from vector retrieval (already filtered by threshold)
+ * @param alpha     Weight for cosine score (1 - alpha = weight for lexical score)
+ */
+export function rerank(
   query: string,
-  retrieved: RetrievedChunk[],
-  systemInstruction: string,
-): string {
-  const contextBlock =
-    retrieved.length > 0
-      ? [
-          "--- Retrieved context ---",
-          ...retrieved.map(
-            ({ source, text, score, type }, i) =>
-              `[${i + 1}] (${type}: ${source}, score: ${score.toFixed(3)})\n${text}`,
-          ),
-          "--- End of context ---",
-          "",
-        ].join("\n")
-      : "";
-
-  return [systemInstruction, contextBlock, `User: ${query}`]
-    .filter(Boolean)
-    .join("\n\n");
+  chunks: RetrievedChunk[],
+  alpha = 0.7,
+): RetrievedChunk[] {
+  const queryTokens = tokenise(query);
+  return chunks
+    .map((c) => {
+      const lexical = jaccardOverlap(queryTokens, tokenise(c.text));
+      const combined = alpha * c.score + (1 - alpha) * lexical;
+      return { ...c, score: combined };
+    })
+    .sort((a, b) => b.score - a.score);
 }
+
+

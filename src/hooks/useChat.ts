@@ -12,7 +12,7 @@
  * - Web API config is persisted to localStorage via persistApiConfig().
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { v4 as uuidv4 } from "uuid";
 import {
   initDatabase,
@@ -27,14 +27,27 @@ import {
   saveKnowledgeChunk,
   listKnowledgeChunks,
   deleteKnowledgeChunk,
+  deleteKnowledgeBySource,
+  deleteMessage,
+  listBookmarkedMessages,
+  getKnowledgeChunksByIds,
+  getMessagesByIds,
+  saveImageAsBlob,
+  listAgents,
+  saveAgent,
+  deleteAgent,
 } from "../lib/db";
+import { extractPdfText } from "../lib/pdf";
+import { MODEL_CATALOGUE } from "../lib/modelCache";
+import { fetchUrlText } from "../lib/urlIngest";
 import {
   embed,
   initEmbeddings,
   getEmbeddingBackend,
   retrieveTopK,
-  buildRagPrompt,
+  rerank,
   splitIntoChunks,
+  invalidateRagPoolCache,
   type EmbeddingStatus,
   type EmbeddingBackend,
   type RetrievedChunk,
@@ -61,7 +74,15 @@ import type {
   KnowledgeChunk,
   ModelConfig,
   AppStatus,
+  Agent,
 } from "../lib/types";
+import {
+  ALL_TOOLS,
+  getToolById,
+  createKnowledgeSearchTool,
+  type Tool,
+  type ToolExecution,
+} from "../lib/tools";
 
 async function resolveDbDir(): Promise<string> {
   if (!isTauri()) return "/tmp/rag-chatbot";
@@ -79,6 +100,12 @@ export function useChat() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [knowledgeChunks, setKnowledgeChunks] = useState<KnowledgeChunk[]>([]);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
+  const [streamingTokensPerSec, setStreamingTokensPerSec] = useState<number>(0);
+  const [streamingTokenCount, setStreamingTokenCount] = useState<number>(0);
+  const streamStartRef = useRef<number>(0);
+  const streamTokenCountRef = useRef<number>(0);
+  const abortControllerRef = useRef<AbortController | null>(null);
+  const isMountedRef = useRef(true);
   const [ragEnabled, setRagEnabled] = useState(true);
 
   // Embedding + LLM backend status surfaced to the UI
@@ -86,28 +113,111 @@ export function useChat() {
   const [embeddingBackend, setEmbeddingBackend] = useState<EmbeddingBackend>("bow");
   const [llmBackend, setLlmBackend] = useState<LlmBackend>("mock");
 
+  // Active model IDs — set when a model is loaded from the model manager
+  const [activeLlmModelId, setActiveLlmModelId] = useState<string | null>(null);
+  const [activeEmbedModelId, setActiveEmbedModelId] = useState<string | null>(null);
+
   // RAG debug: last retrieved chunks shown in the UI
   const [lastRagChunks, setLastRagChunks] = useState<RetrievedChunk[]>([]);
 
+  // Tools
+  const [enabledToolIds, setEnabledToolIds] = useState<Set<string>>(new Set());
+  const [lastToolExecutions, setLastToolExecutions] = useState<ToolExecution[]>([]);
+
+  // Agents
+  const [agents, setAgents] = useState<Agent[]>([]);
+  const [activeAgentId, setActiveAgentIdState] = useState<string | null>(null);
+
+  // Ref that always holds the latest config so setActiveAgentId can persist
+  // without reading stale closure state or calling saveConfig inside an updater.
+  const configRef = useRef<ModelConfig | null>(null);
+  // Ref that always holds the latest conversations list so sendMessage can
+  // read it synchronously without a side-effect inside a state updater.
+  const conversationsRef = useRef<Conversation[]>([]);
+
+  const setActiveAgentId = useCallback((id: string | null) => {
+    setActiveAgentIdState(id);
+    // Build the next config eagerly so saveConfig gets the updated value.
+    // configRef.current is kept in sync by the useEffect below.
+    if (configRef.current) {
+      const next = { ...configRef.current, activeAgentId: id };
+      configRef.current = next;
+      setConfigState(next);
+      saveConfig(next).catch((e) => console.warn("[useChat] saveConfig failed:", e));
+    } else {
+      setConfigState((prev) => prev ? { ...prev, activeAgentId: id } : prev);
+    }
+  }, []);
+
+  // knowledge_search is created once and kept in a ref so it isn't recreated
+  // on every render. It is always available when the embedding engine is ready.
+  const knowledgeSearchToolRef = useRef<Tool | null>(null);
+  if (!knowledgeSearchToolRef.current) {
+    knowledgeSearchToolRef.current = createKnowledgeSearchTool({
+      embed: (text) => embed(text),
+      retrieveTopK: (vec, text, topK, threshold) =>
+        retrieveTopK(vec, text, topK, threshold),
+    });
+  }
+
+  // Memoize so sendMessage (and its useCallback deps) aren't recreated on
+  // every render — enabledToolIds is a Set so we stringify it as the key.
+  const enabledToolIdsKey = Array.from(enabledToolIds).sort().join(",");
+  const enabledTools = useMemo(() => [
+    // Always include knowledge_search so the LLM can explicitly query the KB
+    knowledgeSearchToolRef.current as Tool,
+    ...Array.from(enabledToolIds)
+      .map((id) => getToolById(id))
+      .filter((t): t is Tool => t !== undefined),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  ], [enabledToolIdsKey]);
+
   const modelsLoaded = useRef(false);
+  // Ref-based guard for sendMessage — prevents concurrent sends even when
+  // the status state hasn't re-rendered yet (stale closure race).
+  const sendingRef = useRef(false);
+
+  // Ref that always holds the current active conversation ID so async callbacks
+  // (e.g. summarizeConversation's onDone) can check whether the user has
+  // switched away mid-operation without capturing a stale closure value.
+  const activeConvIdRef = useRef<string | null>(null);
+
+  // Keep refs in sync so callbacks can read latest values without stale closures.
+  useEffect(() => { configRef.current = config; }, [config]);
+  useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
+  useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
 
   // ── Initialisation ───────────────────────────────────────────────────────
 
   useEffect(() => {
+    // Reset mount flag — StrictMode unmounts and remounts, so we must restore
+    // it here rather than relying on the initial useRef(true) value.
+    isMountedRef.current = true;
+    let cancelled = false;
+
     (async () => {
       try {
         setStatus("loading-models");
         const dbDir = await resolveDbDir();
         await initDatabase(dbDir);
+        if (cancelled) return;
 
         const cfg = await loadConfig();
+        if (cancelled) return;
         setConfigState(cfg);
 
         const convs = await listConversations();
+        if (cancelled) return;
         setConversations(convs);
 
         const chunks = await listKnowledgeChunks();
+        if (cancelled) return;
         setKnowledgeChunks(chunks);
+
+        const agentList = await listAgents();
+        if (cancelled) return;
+        setAgents(agentList);
+        if (cfg.activeAgentId) setActiveAgentId(cfg.activeAgentId);
 
         // Restore persisted web API config
         loadPersistedApiConfig();
@@ -116,39 +226,124 @@ export function useChat() {
         const embStatus = await initEmbeddings(
           !isTauri() ? cfg.embeddingModelPath || undefined : undefined,
         );
+        if (cancelled) return;
         setEmbeddingStatus(embStatus);
         setEmbeddingBackend(getEmbeddingBackend());
 
         // Load LiteRT models on Tauri
         if (cfg.lmModelPath || cfg.embeddingModelPath) {
           await loadModels(cfg);
+          // Check cancelled BEFORE setting the flag — if the effect was cleaned
+          // up (StrictMode remount or config change) while loadModels was awaiting,
+          // modelsLoaded must stay false so the next mount re-loads correctly.
+          if (cancelled) return;
           modelsLoaded.current = true;
         }
 
+        if (cancelled) return;
         setLlmBackend(getActiveBackend());
         setStatus("ready");
       } catch (err) {
-        setError(String(err));
-        setStatus("error");
+        if (!cancelled) { setError(String(err)); setStatus("error"); }
       }
     })();
 
-    return () => { unloadModels().catch(() => {}); };
+    return () => {
+      cancelled = true;
+      isMountedRef.current = false;
+      sendingRef.current = false;
+      unloadModels().catch(() => {});
+    };
+  }, []);
+
+  /** Retry initialisation after a transient startup failure. */
+  const retryInit = useCallback(() => {
+    setError(null);
+    setStatus("loading-models");
+    (async () => {
+      try {
+        const dbDir = await resolveDbDir();
+        await initDatabase(dbDir);
+        if (!isMountedRef.current) return;
+        const cfg = await loadConfig();
+        if (!isMountedRef.current) return;
+        setConfigState(cfg);
+        const convs = await listConversations();
+        if (!isMountedRef.current) return;
+        setConversations(convs);
+        const chunks = await listKnowledgeChunks();
+        if (!isMountedRef.current) return;
+        setKnowledgeChunks(chunks);
+        const agentList = await listAgents();
+        if (!isMountedRef.current) return;
+        setAgents(agentList);
+        loadPersistedApiConfig();
+        const embStatus = await initEmbeddings(
+          !isTauri() ? cfg.embeddingModelPath || undefined : undefined,
+        );
+        if (!isMountedRef.current) return;
+        setEmbeddingStatus(embStatus);
+        setEmbeddingBackend(getEmbeddingBackend());
+        if (cfg.lmModelPath || cfg.embeddingModelPath) {
+          await loadModels(cfg);
+          if (!isMountedRef.current) return;
+          modelsLoaded.current = true;
+        }
+        if (!isMountedRef.current) return;
+        setLlmBackend(getActiveBackend());
+        setStatus("ready");
+      } catch (err) {
+        if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+      }
+    })();
   }, []);
 
   // ── Config ───────────────────────────────────────────────────────────────
 
   const updateConfig = useCallback(async (next: ModelConfig) => {
     await saveConfig(next);
+    if (!isMountedRef.current) return;
     setConfigState(next);
-    if (modelsLoaded.current) { await unloadModels(); modelsLoaded.current = false; }
-    if (next.lmModelPath || next.embeddingModelPath) {
-      setStatus("loading-models");
-      await loadModels(next);
-      modelsLoaded.current = true;
-      setStatus("ready");
+    // Invalidate the RAG pool cache whenever config changes — ragSourceTypes
+    // or chunkSize/overlap changes would otherwise serve stale cached results.
+    invalidateRagPoolCache();
+    if (isTauri()) {
+      // Tauri: loadModels handles both LM and embedding via IPC.
+      if (modelsLoaded.current) {
+        try { await unloadModels(); } catch { /* ignore unload errors */ }
+        modelsLoaded.current = false;
+      }
+      if (next.lmModelPath || next.embeddingModelPath) {
+        if (!isMountedRef.current) return;
+        setStatus("loading-models");
+        setError(null);
+        try {
+          await loadModels(next);
+          modelsLoaded.current = true;
+          if (isMountedRef.current) setStatus("ready");
+        } catch (err) {
+          modelsLoaded.current = false;
+          if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+        }
+      }
+    } else {
+      // Web: loadModels is a no-op. Re-initialise the embedding engine directly
+      // when embeddingModelPath changes so the new model is actually loaded.
+      if (next.embeddingModelPath) {
+        setStatus("loading-models");
+        setError(null);
+        try {
+          const embStatus = await initEmbeddings(next.embeddingModelPath || undefined);
+          if (!isMountedRef.current) return;
+          setEmbeddingStatus(embStatus);
+          setEmbeddingBackend(getEmbeddingBackend());
+          setStatus("ready");
+        } catch (err) {
+          if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+        }
+      }
     }
-    setLlmBackend(getActiveBackend());
+    if (isMountedRef.current) setLlmBackend(getActiveBackend());
   }, []);
 
   // ── Preset loader ────────────────────────────────────────────────────────
@@ -160,18 +355,19 @@ export function useChat() {
       // Load embedding model first (smaller, faster)
       if (preset.embedUrl && !isTauri()) {
         const embStatus = await initEmbeddings(preset.embedUrl);
+        if (!isMountedRef.current) return;
         setEmbeddingStatus(embStatus);
         setEmbeddingBackend(getEmbeddingBackend());
       }
       // Load web LLM
       if (preset.llmUrl && !isTauri()) {
         await loadWebLlm({ modelUrl: preset.llmUrl });
+        if (!isMountedRef.current) return;
         setLlmBackend(getActiveBackend());
       }
-      setStatus("ready");
+      if (isMountedRef.current) setStatus("ready");
     } catch (err) {
-      setError(String(err));
-      setStatus("error");
+      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
     }
   }, []);
 
@@ -181,11 +377,11 @@ export function useChat() {
     setStatus("loading-models");
     try {
       await loadWebLlm(opts);
+      if (!isMountedRef.current) return;
       setLlmBackend(getActiveBackend());
       setStatus("ready");
     } catch (err) {
-      setError(String(err));
-      setStatus("error");
+      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
     }
   }, []);
 
@@ -204,9 +400,53 @@ export function useChat() {
   // ── Embedding engine ─────────────────────────────────────────────────────
 
   const initEmbeddingEngine = useCallback(async (liteRtModelUrl?: string) => {
-    const status = await initEmbeddings(liteRtModelUrl);
-    setEmbeddingStatus(status);
+    const embStatus = await initEmbeddings(liteRtModelUrl);
+    if (!isMountedRef.current) return;
+    setEmbeddingStatus(embStatus);
     setEmbeddingBackend(getEmbeddingBackend());
+  }, []);
+
+  // ── Model manager loader ─────────────────────────────────────────────────
+  //
+  // Called by ModelManagerPanel when the user clicks "Load" on a cached model.
+  // Handles both LLM (.task via MediaPipe) and embedding (.tflite via LiteRT).
+
+  const loadLlmFromCache = useCallback(async (url: string, modelId: string) => {
+    setStatus("loading-models");
+    setError(null);
+    try {
+      await loadWebLlm({ modelUrl: url });
+      if (!isMountedRef.current) return;
+      setActiveLlmModelId(modelId);
+      setLlmBackend(getActiveBackend());
+      // Persist the catalogue contextLength into config so the context bar
+      // shows the correct window size for this model.
+      const catalogueEntry = MODEL_CATALOGUE.find((m) => m.id === modelId);
+      if (catalogueEntry?.contextLength && configRef.current) {
+        const next = { ...configRef.current, contextLength: catalogueEntry.contextLength };
+        configRef.current = next;
+        setConfigState(next);
+        saveConfig(next).catch((e) => console.warn("[useChat] saveConfig failed:", e));
+      }
+      setStatus("ready");
+    } catch (err) {
+      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+    }
+  }, []);
+
+  const loadEmbedFromCache = useCallback(async (url: string, modelId: string) => {
+    setStatus("loading-models");
+    setError(null);
+    try {
+      const embStatus = await initEmbeddings(url);
+      if (!isMountedRef.current) return;
+      setActiveEmbedModelId(modelId);
+      setEmbeddingStatus(embStatus);
+      setEmbeddingBackend(getEmbeddingBackend());
+      setStatus("ready");
+    } catch (err) {
+      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+    }
   }, []);
 
   // ── Conversations ────────────────────────────────────────────────────────
@@ -216,30 +456,65 @@ export function useChat() {
     const now = new Date().toISOString();
     const conv: Conversation = { id, title: "New conversation", createdAt: now, updatedAt: now };
     await saveConversation(conv);
-    setConversations((prev) => [conv, ...prev]);
+    if (isMountedRef.current) setConversations((prev) => [conv, ...prev]);
     return id;
   }, []);
 
-  const selectConversation = useCallback(async (id: string) => {
+  // Tracks the most recently requested conversation ID so that a slow
+  // listMessages() response for an earlier selection doesn't overwrite the
+  // messages of a later selection (rapid switching race condition).
+  const pendingConvIdRef = useRef<string | null>(null);
+
+  const selectConversation = useCallback((id: string): Promise<void> => {
     setActiveConvId(id);
     setLastRagChunks([]);
-    const msgs = await listMessages(id);
-    setMessages(msgs);
+    pendingConvIdRef.current = id;
+    return listMessages(id).then((msgs) => {
+      // Discard if the user switched away before this response arrived.
+      if (pendingConvIdRef.current !== id) return;
+      if (isMountedRef.current) setMessages(msgs);
+    }).catch((e) => {
+      if (pendingConvIdRef.current !== id) return;
+      if (isMountedRef.current) { setError(String(e)); setStatus("error"); }
+    });
   }, []);
 
   const renameConversation = useCallback(async (id: string, title: string) => {
     const conv = await getConversation(id);
-    if (!conv) return;
+    if (!conv || !isMountedRef.current) return;
     const updated = { ...conv, title, updatedAt: new Date().toISOString() };
     await saveConversation(updated);
-    setConversations((prev) => prev.map((c) => (c.id === id ? updated : c)));
+    if (isMountedRef.current) setConversations((prev) => prev.map((c) => (c.id === id ? updated : c)));
+  }, []);
+
+  const updateConversationInstruction = useCallback(async (id: string, systemInstruction: string) => {
+    const conv = await getConversation(id);
+    if (!conv || !isMountedRef.current) return;
+    const updated = { ...conv, systemInstruction: systemInstruction || undefined, updatedAt: new Date().toISOString() };
+    await saveConversation(updated);
+    if (isMountedRef.current) setConversations((prev) => prev.map((c) => (c.id === id ? updated : c)));
   }, []);
 
   const removeConversation = useCallback(async (id: string) => {
+    // Abort any in-flight generation for this conversation so onDone doesn't
+    // write an orphaned assistant message to the deleted conversation's DB doc.
+    if (activeConvIdRef.current === id) {
+      abortControllerRef.current?.abort();
+      abortControllerRef.current = null;
+      sendingRef.current = false;
+    }
+    // deleteConversation cascades to all messages + their chunk siblings
     await deleteConversation(id);
+    invalidateRagPoolCache();
+    if (!isMountedRef.current) return;
     setConversations((prev) => prev.filter((c) => c.id !== id));
-    if (activeConvId === id) { setActiveConvId(null); setMessages([]); }
-  }, [activeConvId]);
+    if (activeConvIdRef.current === id) {
+      setActiveConvId(null);
+      setMessages([]);
+      setStreamingContent(null);
+      setStatus("ready");
+    }
+  }, []);
 
   // ── Embed a message and save its vector(s) back to CouchbaseLite ─────────
   //
@@ -249,30 +524,46 @@ export function useChat() {
   // The original message document gets the embedding of its first chunk so
   // it remains retrievable even without loading all chunks.
 
-  const embedAndSave = useCallback(async (msg: Message) => {
+  const embedAndSave = useCallback(async (msg: Message): Promise<number[] | null> => {
     try {
       const modelId = modelsLoaded.current ? EMBED_MODEL_ID : undefined;
-      const chunks = splitIntoChunks(msg.content);
+      const chunks = splitIntoChunks(
+        msg.content,
+        config?.chunkSize,
+        config?.chunkOverlap,
+      );
 
       if (chunks.length <= 1) {
         // Single chunk — embed in-place on the original message document
         const vec = await embed(msg.content, modelId);
         const updated: Message = { ...msg, embedding: vec };
         await saveMessage(updated);
-        setMessages((prev) => prev.map((m) => (m.id === msg.id ? updated : m)));
-        return;
+        if (isMountedRef.current) {
+          setMessages((prev) => prev.map((m) => (m.id === msg.id ? updated : m)));
+        }
+        return vec; // return for reuse by caller
       }
 
-      // Multiple chunks — embed each and save as child message documents
+      // Multiple chunks — embed each and save as sibling message documents.
+      // Track sibling IDs on the parent so they can be cascade-deleted later.
+      const chunkIds: string[] = [];
+      for (let i = 1; i < chunks.length; i++) {
+        chunkIds.push(`${msg.id}-chunk-${i}`);
+      }
+
+      let firstVec: number[] | null = null;
       for (let i = 0; i < chunks.length; i++) {
         const vec = await embed(chunks[i], modelId);
         if (i === 0) {
-          // Update the original message with the first chunk's embedding
-          const updated: Message = { ...msg, embedding: vec };
+          firstVec = vec;
+          // Update the original message with the first chunk's embedding and
+          // the list of sibling IDs so deletes can cascade.
+          const updated: Message = { ...msg, embedding: vec, chunkIds };
           await saveMessage(updated);
-          setMessages((prev) => prev.map((m) => (m.id === msg.id ? updated : m)));
+          if (isMountedRef.current) {
+            setMessages((prev) => prev.map((m) => (m.id === msg.id ? updated : m)));
+          }
         } else {
-          // Save additional chunks as sibling documents
           const chunkMsg: Message = {
             id: `${msg.id}-chunk-${i}`,
             conversationId: msg.conversationId,
@@ -280,26 +571,45 @@ export function useChat() {
             content: chunks[i],
             createdAt: msg.createdAt,
             embedding: vec,
+            isChunk: true,
           };
           await saveMessage(chunkMsg);
         }
       }
+      return firstVec; // reusable by caller for RAG retrieval
     } catch (e) {
       console.warn("[useChat] embed failed:", e);
+      return null;
     }
-  }, []);
+  }, [config]);
 
   // ── Send a message ───────────────────────────────────────────────────────
 
-  const sendMessage = useCallback(async (text: string) => {
+  const sendMessage = useCallback(async (text: string, imageDataUrl?: string, historyOverride?: Message[]) => {
     if (!config) return;
-    if (status === "generating" || status === "embedding") return;
+    // Use a ref guard in addition to status so rapid concurrent calls in the
+    // same tick (before React re-renders) are also blocked.
+    if (sendingRef.current) return;
+    if (status === "generating" || status === "embedding" || status === "loading-models") return;
+    sendingRef.current = true;
+    // Hoist assistantId outside the try block so the catch can remove the
+    // placeholder bubble if an exception fires after it was added to messages.
+    let assistantId = "";
+    try {
 
-    let convId = activeConvId;
+    // Use the ref so a conversation switch between the guard check and the
+    // first await doesn't attribute the message to the wrong conversation.
+    let convId = activeConvIdRef.current;
     if (!convId) {
       convId = await createConversation();
       setActiveConvId(convId);
     }
+
+    // Convert image data URL to a CBL blob reference on Tauri before persisting.
+    // On web the data URL is stored as-is (no blob API available).
+    const storedImageRef = imageDataUrl
+      ? await saveImageAsBlob(imageDataUrl)
+      : undefined;
 
     // Persist user message
     const userMsg: Message = {
@@ -308,21 +618,40 @@ export function useChat() {
       role: "user",
       content: text,
       createdAt: new Date().toISOString(),
+      ...(storedImageRef ? { imageDataUrl: storedImageRef } : {}),
     };
     await saveMessage(userMsg);
     setMessages((prev) => [...prev, userMsg]);
 
-    // Auto-title from first user message
-    const conv = conversations.find((c) => c.id === convId);
-    if (conv?.title === "New conversation") {
-      await renameConversation(convId, text.slice(0, 60) + (text.length > 60 ? "…" : ""));
+    // Auto-title from first user message.
+    // Read the latest conversations snapshot via a ref-captured value so we
+    // don't need a side-effect inside the state updater (which runs twice in
+    // StrictMode and would fire renameConversation twice).
+    const convSnapshot = conversationsRef.current.find((c) => c.id === convId);
+    if (convSnapshot?.title === "New conversation") {
+      const autoTitle = text.slice(0, 60) + (text.length > 60 ? "…" : "");
+      setConversations((prev) =>
+        prev.map((c) => c.id === convId ? { ...c, title: autoTitle } : c),
+      );
+      renameConversation(convId, autoTitle).catch((e) => {
+        if (isMountedRef.current) setError(String(e));
+      });
     }
 
-    // Embed user message in background (don't block generation)
+    // Embed user message — runs in background but we await it before RAG retrieval.
+    // embedAndSave returns the first-chunk vector so we can reuse it for retrieval
+    // without a second embed() call.
     const userEmbedPromise = embedAndSave(userMsg);
+
+    const abortController = new AbortController();
+    abortControllerRef.current = abortController;
 
     setStatus("generating");
     setStreamingContent("");
+    setStreamingTokensPerSec(0);
+    streamStartRef.current = Date.now();
+    streamTokenCountRef.current = 0;
+    setStreamingTokenCount(0);
     setLastRagChunks([]);
 
     // ── RAG retrieval ──────────────────────────────────────────────────────
@@ -332,21 +661,42 @@ export function useChat() {
     if (ragEnabled) {
       try {
         setStatus("embedding");
-        await userEmbedPromise; // need the vector before retrieval
-        const userVec = await embed(
+        // Reuse the vector from embedAndSave — avoids a second embed() call.
+        // Fall back to a fresh embed if embedAndSave failed (returned null).
+        const savedVec = await userEmbedPromise;
+        const userVec = savedVec ?? await embed(
           text,
           modelsLoaded.current ? EMBED_MODEL_ID : undefined,
         );
-        const retrieved = await retrieveTopK(
+        const rawRetrieved = await retrieveTopK(
           userVec,
-          config.ragTopK,
-          0.3,
-          convId, // exclude current conversation's own messages
+          text,
+          config.ragTopK * 3, // over-fetch for re-ranking
+          config.ragThreshold ?? 0.3,
+          convId,
+          config.ragSourceTypes ?? ["knowledge", "message"],
+          config.hybridBm25Weight ?? 0.3,
         );
+        // Jaccard re-ranking is only meaningful on cosine scores (0–1).
+        // When BM25 is active, RRF fusion already incorporates lexical signal
+        // and produces tiny scores (~0.008) that make alpha weighting useless.
+        const bm25Weight = config.hybridBm25Weight ?? 0.3;
+        const retrieved = (bm25Weight === 0 ? rerank(text, rawRetrieved) : rawRetrieved)
+          .slice(0, config.ragTopK);
         ragSourceIds = retrieved.map((r) => r.id);
         setLastRagChunks(retrieved);
         if (retrieved.length > 0) {
-          ragContext = buildRagPrompt("", retrieved, "").split("User:")[0].trim();
+          // Build only the context block — pass empty query and system so the
+          // result is just the "--- Retrieved context ---" section.
+          const lines = [
+            "--- Retrieved context ---",
+            ...retrieved.map(
+              ({ source, text, score, type }, i) =>
+                `[${i + 1}] (${type}: ${source}, score: ${score.toFixed(3)})\n${text}`,
+            ),
+            "--- End of context ---",
+          ];
+          ragContext = lines.join("\n");
         }
       } catch {
         // Embedding failed — proceed without RAG context
@@ -355,16 +705,27 @@ export function useChat() {
       setLastRagChunks([]);
     }
 
+    // If the user aborted while RAG retrieval was running, bail before
+    // starting generation — avoids a setLastRagChunks call on a stale conv.
+    if (abortController.signal.aborted) {
+      sendingRef.current = false;
+      if (isMountedRef.current) setStatus("ready");
+      return;
+    }
+
     setStatus("generating");
+    setLastToolExecutions([]);
 
     // ── Build history for the LLM ──────────────────────────────────────────
-    const history = messages
+    // historyOverride is used by editMessage to pass the already-truncated
+    // message list synchronously, before React re-renders with the new state.
+    const history = (historyOverride ?? messages)
       .concat(userMsg)
       .map((m) => ({ role: m.role, content: m.content }));
 
     // ── Stream generation ──────────────────────────────────────────────────
     let accumulated = "";
-    const assistantId = uuidv4();
+    assistantId = uuidv4();
 
     // Add placeholder so the streaming bubble has an ID to update
     const placeholderMsg: Message = {
@@ -376,98 +737,744 @@ export function useChat() {
     };
     setMessages((prev) => [...prev, placeholderMsg]);
 
+    // Resolve system instruction: active agent > conversation override > default
+    const activeAgentNow = agents.find((a) => a.id === activeAgentId) ?? null;
+    const currentConv = conversationsRef.current.find((c) => c.id === convId);
+    const systemInstruction =
+      activeAgentNow?.systemPrompt ??
+      currentConv?.systemInstruction ??
+      "You are a helpful assistant. Answer using the provided context when relevant.";
+
     await generateStream(
       history,
       ragContext,
       {
         modelId: config.lmModelPath ? "rag-lm" : undefined,
-        systemInstruction: conv?.systemInstruction ??
-          "You are a helpful assistant. Answer using the provided context when relevant.",
+        systemInstruction,
         config,
+        enabledTools,
+        signal: abortController.signal,
+        imageDataUrl,
       },
       {
         onChunk: (chunk) => {
+          if (!isMountedRef.current) return;
           accumulated += chunk;
+          streamTokenCountRef.current += 1;
+          setStreamingTokenCount(streamTokenCountRef.current);
+          const elapsed = (Date.now() - streamStartRef.current) / 1000;
+          if (elapsed > 0.5) {
+            setStreamingTokensPerSec(streamTokenCountRef.current / elapsed);
+          }
           setStreamingContent(accumulated);
           setMessages((prev) =>
             prev.map((m) => m.id === assistantId ? { ...m, content: accumulated } : m),
           );
         },
-        onDone: async (latencyMs) => {
+        onDone: async (latencyMs: number) => {
+          const wasStopped = abortController.signal.aborted;
+          // Always clear these regardless of mount state
+          sendingRef.current = false;
           setStreamingContent(null);
-          const assistantMsg: Message = {
-            ...placeholderMsg,
-            content: accumulated,
-            latencyMs,
-            ragSourceIds,
-          };
-          await saveMessage(assistantMsg);
-          setMessages((prev) =>
-            prev.map((m) => m.id === assistantId ? assistantMsg : m),
-          );
 
-          // Embed the completed assistant message (index both sides)
-          embedAndSave(assistantMsg);
+          if (!isMountedRef.current) return;
+          // Save whatever was accumulated — even a partial response is useful
+          if (accumulated.trim()) {
+            const assistantMsg: Message = {
+              ...placeholderMsg,
+              content: accumulated,
+              latencyMs,
+              ragSourceIds,
+              stopped: wasStopped || undefined,
+            };
+            await saveMessage(assistantMsg);
+            if (isMountedRef.current) {
+              setMessages((prev) =>
+                prev.map((m) => m.id === assistantId ? assistantMsg : m),
+              );
+            }
+            // Only embed and notify on a complete (non-stopped) response
+            if (!wasStopped) {
+              void embedAndSave(assistantMsg);
+              notifyIfHidden("Response ready", accumulated.slice(0, 80) + (accumulated.length > 80 ? "…" : ""));
+            }
+          } else if (isMountedRef.current) {
+            setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+          }
 
-          // Update conversation timestamp
-          if (conv) {
-            await saveConversation({ ...conv, updatedAt: new Date().toISOString() });
+          if (!isMountedRef.current) return;
+          // Read from ref to avoid side-effects inside the state updater
+          // (updaters run twice in StrictMode — DB writes must stay outside).
+          const latestConv = conversationsRef.current.find((c) => c.id === convId);
+          if (latestConv) {
+            const updatedConv = { ...latestConv, updatedAt: new Date().toISOString() };
+            setConversations((prev) =>
+              prev.map((c) => c.id === convId ? updatedConv : c),
+            );
+            saveConversation(updatedConv).catch((e) => console.warn("[useChat] saveConversation failed:", e));
           }
           setStatus("ready");
         },
+        onToolCall: (_toolId, _args) => {
+          if (isMountedRef.current) setStatus("generating");
+        },
+        onToolResult: (execution) => {
+          if (isMountedRef.current) setLastToolExecutions((prev) => [...prev, execution]);
+        },
         onError: (err) => {
+          sendingRef.current = false;
+          if (!isMountedRef.current) return;
           setStreamingContent(null);
+          setMessages((prev) => prev.filter((m) => m.id !== assistantId));
           setError(err);
           setStatus("error");
         },
       },
     );
+    } catch (err) {
+      sendingRef.current = false;
+      if (isMountedRef.current) {
+        // Remove the placeholder bubble that was pushed before generateStream,
+        // and clear the streaming indicator so the UI doesn't freeze.
+        setStreamingContent(null);
+        setMessages((prev) => prev.filter((m) => m.id !== assistantId));
+        setError(String(err));
+        setStatus("error");
+      }
+    }
   }, [
-    config, status, activeConvId, conversations, messages,
+    // conversations is accessed via conversationsRef (kept in sync by useEffect)
+    // so it doesn't need to be a dep — removing it prevents sendMessage from
+    // being recreated on every saveConversation call.
+    config, status, activeConvId, messages,
+    agents, activeAgentId,
+    ragEnabled, enabledTools,
     createConversation, renameConversation, embedAndSave,
   ]);
+
+  // ── Agents ───────────────────────────────────────────────────────────────
+
+  const createAgent = useCallback(async (
+    name: string,
+    systemPrompt: string,
+    description?: string,
+  ): Promise<Agent> => {
+    const now = new Date().toISOString();
+    const agent: Agent = {
+      id: uuidv4(),
+      name,
+      systemPrompt,
+      description,
+      createdAt: now,
+      updatedAt: now,
+    };
+    await saveAgent(agent);
+    setAgents((prev) => [...prev, agent].sort((a, b) => a.name.localeCompare(b.name)));
+    return agent;
+  }, []);
+
+  const updateAgent = useCallback(async (
+    id: string,
+    patch: Partial<Pick<Agent, "name" | "systemPrompt" | "description">>,
+  ) => {
+    // Read from in-memory state before the updater runs to avoid a stale DB round-trip
+    const current = agents.find((a) => a.id === id);
+    if (!current) return;
+    const updated = { ...current, ...patch, updatedAt: new Date().toISOString() };
+    setAgents((prev) =>
+      prev
+        .map((a) => (a.id !== id ? a : updated))
+        .sort((a, b) => a.name.localeCompare(b.name)),
+    );
+    await saveAgent(updated);
+  }, [agents]);
+
+  const removeAgent = useCallback(async (id: string) => {
+    await deleteAgent(id);
+    setAgents((prev) => prev.filter((a) => a.id !== id));
+    if (activeAgentId === id) setActiveAgentId(null);
+  }, [activeAgentId]);
+
+  // ── Full-text search across all conversations ─────────────────────────────
+
+  const searchConversations = useCallback(async (query: string): Promise<
+    Array<{ convId: string; convTitle: string; messageId: string; snippet: string; role: string }>
+  > => {
+    if (!query.trim()) return [];
+    const q = query.toLowerCase();
+
+    // On Tauri: single N1QL LIKE query across all messages — O(1) DB round-trips.
+    // On web: scan the in-memory store directly without per-conversation fetches.
+    let matchingMsgs: import("../lib/types").Message[];
+    if (isTauri()) {
+      const { executeQuery } = await import("tauri-plugin-cblite");
+      const rows = await executeQuery(
+        "N1QL",
+        `SELECT META().id AS id, conversationId, role, content, createdAt
+         FROM \`_default\`.messages
+         WHERE LOWER(content) LIKE $pattern
+           AND (isChunk IS MISSING OR isChunk = false)
+         ORDER BY createdAt DESC
+         LIMIT 200`,
+        { pattern: `%${q}%` },
+      );
+      matchingMsgs = rows as import("../lib/types").Message[];
+    } else {
+      // Web: fetch messages from all conversations sequentially.
+      // The messages state only holds the active conversation, so we must
+      // query each conversation individually.
+      const allMsgs: import("../lib/types").Message[] = [];
+      for (const conv of conversations) {
+        const msgs = await listMessages(conv.id, 500);
+        allMsgs.push(...msgs);
+      }
+      matchingMsgs = allMsgs.filter(
+        (m) => !m.isChunk && m.content.toLowerCase().includes(q),
+      );
+    }
+
+    const convMap = new Map(conversations.map((c) => [c.id, c.title]));
+    const results: Array<{ convId: string; convTitle: string; messageId: string; snippet: string; role: string }> = [];
+
+    for (const msg of matchingMsgs) {
+      const idx = msg.content.toLowerCase().indexOf(q);
+      if (idx === -1) continue;
+      const start = Math.max(0, idx - 40);
+      const end = Math.min(msg.content.length, idx + query.length + 60);
+      const snippet =
+        (start > 0 ? "…" : "") +
+        msg.content.slice(start, end) +
+        (end < msg.content.length ? "…" : "");
+      results.push({
+        convId: msg.conversationId,
+        convTitle: convMap.get(msg.conversationId) ?? msg.conversationId,
+        messageId: msg.id,
+        snippet,
+        role: msg.role,
+      });
+    }
+    return results;
+  // messages removed from deps — web path now fetches per-conversation via
+  // listMessages() rather than filtering the active-conversation state.
+  }, [conversations]);
+
+  // ── Conversation summary ──────────────────────────────────────────────────
+  //
+  // Compresses the oldest messages in the active conversation into a single
+  // summary message. Bookmarked messages are never removed.
+  // Triggered manually or when context usage exceeds a threshold.
+
+  const summarizeConversation = useCallback((keepLast = 6): void => {
+    if (!config || !activeConvId) return;
+    if (messages.length <= keepLast + 2) return; // nothing to compress
+    // Guard against concurrent sendMessage calls during summarisation.
+    if (sendingRef.current) return;
+    sendingRef.current = true;
+    void (async () => { try {
+
+    // Capture before any await so conversation switches mid-generation don't
+    // corrupt the wrong conversation's message list.
+    const convId = activeConvId;
+    const snapshotMessages = messages;
+
+    // Split: messages to summarise vs messages to keep
+    const toSummarise = snapshotMessages.slice(0, snapshotMessages.length - keepLast)
+      .filter((m) => !m.bookmarked); // never remove bookmarked messages
+    if (toSummarise.length < 2) { sendingRef.current = false; return; }
+
+    const toSummariseIds = new Set(toSummarise.map((m) => m.id));
+    const toKeep = snapshotMessages.filter((m) => !toSummariseIds.has(m.id));
+
+    setStatus("generating");
+    setStreamingContent(""); // show streaming bubble during summarisation
+    setError(null);
+
+    const transcript = toSummarise
+      .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
+      .join("\n\n");
+
+    const summaryPrompt = [
+      { role: "system", content: "You are a concise summariser. Produce a factual summary of the conversation below, preserving key facts, decisions, and context. Write in third person. Be brief." },
+      { role: "user", content: `Summarise this conversation:\n\n${transcript}` },
+    ];
+
+    let summaryText = "";
+    // Wire to abortControllerRef so the global Stop button cancels summarisation
+    const summaryAbort = new AbortController();
+    abortControllerRef.current = summaryAbort;
+    await generateStream(
+      summaryPrompt,
+      "",
+      { config, signal: summaryAbort.signal },
+      {
+        onChunk: (c) => {
+          summaryText += c;
+          if (isMountedRef.current) setStreamingContent(summaryText);
+        },
+        onDone: async () => {
+          if (isMountedRef.current) setStreamingContent(null);
+          // Don't commit if the user aborted or summary was empty
+          if (summaryAbort.signal.aborted || !summaryText.trim()) {
+            sendingRef.current = false;
+            if (isMountedRef.current) setStatus("ready");
+            return;
+          }
+
+          const summaryMsg: Message = {
+            id: uuidv4(),
+            conversationId: convId,
+            role: "assistant",
+            content: `**[Conversation summary]**\n\n${summaryText.trim()}`,
+            // Place at the timestamp of the first summarised message
+            createdAt: toSummarise[0].createdAt,
+          };
+
+          // Save the summary FIRST, then delete the source messages.
+          // This order ensures no data is lost if the process is interrupted
+          // between the two steps — a duplicate summary is recoverable,
+          // deleted messages without a summary are not.
+          if (summaryAbort.signal.aborted || !isMountedRef.current) { sendingRef.current = false; return; }
+          await saveMessage(summaryMsg);
+          if (summaryAbort.signal.aborted || !isMountedRef.current) { sendingRef.current = false; return; }
+          for (const m of toSummarise) await deleteMessage(m.id);
+
+          if (isMountedRef.current) {
+            // Only update messages if the user hasn't switched to a different
+            // conversation while the summary was generating. activeConvIdRef
+            // always holds the current value, avoiding a stale closure.
+            if (activeConvIdRef.current === convId) {
+              setMessages([summaryMsg, ...toKeep].sort((a, b) => a.createdAt.localeCompare(b.createdAt)));
+            }
+            setStatus("ready");
+          }
+          sendingRef.current = false;
+        },
+        onError: (err) => {
+          sendingRef.current = false;
+          if (isMountedRef.current) { setStreamingContent(null); setError(err); setStatus("error"); }
+        },
+      },
+    );
+    } catch (err) {
+      sendingRef.current = false;
+      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+    } })();
+  }, [config, activeConvId, messages]);
+
+  // ── Re-embed all ──────────────────────────────────────────────────────────
+  //
+  // Re-computes embeddings for every knowledge chunk and every conversation
+  // message using the currently loaded embedding model. Use after switching
+  // embedding models to avoid stale vectors degrading retrieval quality.
+
+  const [reEmbedProgress, setReEmbedProgress] = useState<{ done: number; total: number } | null>(null);
+  const [ingestProgress, setIngestProgress] = useState<{ done: number; total: number; source: string } | null>(null);
+  const reEmbedAbortRef = useRef<AbortController | null>(null);
+
+  const cancelReEmbed = useCallback(() => {
+    reEmbedAbortRef.current?.abort();
+  }, []);
+
+  const reEmbedAll = useCallback(async () => {
+    // Cancel any in-flight re-embed before starting a new one
+    reEmbedAbortRef.current?.abort();
+    const abort = new AbortController();
+    reEmbedAbortRef.current = abort;
+
+    setStatus("embedding");
+    setError(null);
+    const modelId = modelsLoaded.current ? EMBED_MODEL_ID : undefined;
+
+    try {
+      const allChunks = await listKnowledgeChunks();
+
+      // Use conversationsRef so conversations created after reEmbedAll started
+      // are included. The state closure would be stale for long-running re-embeds.
+      const allConversations = conversationsRef.current;
+
+      // Count total messages without loading them all — use conversation list
+      // as a proxy. We'll update total as we go if counts differ.
+      let total = allChunks.length + allConversations.length; // rough estimate
+      let done = 0;
+      if (isMountedRef.current) setReEmbedProgress({ done, total });
+
+      // Re-embed knowledge chunks
+      for (const chunk of allChunks) {
+        if (abort.signal.aborted) break;
+        const embedding = await embed(chunk.text, modelId);
+        if (abort.signal.aborted) break;
+        await saveKnowledgeChunk({ ...chunk, embedding });
+        done++;
+        if (isMountedRef.current) setReEmbedProgress({ done, total });
+      }
+      if (!abort.signal.aborted && isMountedRef.current) setKnowledgeChunks(await listKnowledgeChunks());
+
+      // Re-embed messages one conversation at a time — never accumulate all
+      // messages in memory simultaneously.
+      for (const conv of allConversations) {
+        if (abort.signal.aborted) break;
+        const msgs = await listMessages(conv.id);
+        // Adjust total now that we know the real message count for this conv
+        total = total - 1 + msgs.length; // replace the 1-conv estimate with actual message count
+        if (isMountedRef.current) setReEmbedProgress({ done, total });
+
+        for (const msg of msgs) {
+          if (abort.signal.aborted) break;
+          if (msg.content.trim().length < 20) {
+            done++;
+            if (isMountedRef.current) setReEmbedProgress({ done, total });
+            continue;
+          }
+          const chunks = splitIntoChunks(
+            msg.content,
+            config?.chunkSize,
+            config?.chunkOverlap,
+          );
+          const embedding = await embed(chunks[0] ?? msg.content, modelId);
+          if (abort.signal.aborted) break;
+          await saveMessage({ ...msg, embedding });
+
+          // Re-embed chunk siblings if this message was previously split
+          if (msg.chunkIds?.length && chunks.length > 1) {
+            for (let i = 1; i < chunks.length && i - 1 < msg.chunkIds.length; i++) {
+              if (abort.signal.aborted) break;
+              const siblingEmb = await embed(chunks[i], modelId);
+              if (abort.signal.aborted) break;
+              await saveMessage({
+                id: msg.chunkIds[i - 1],
+                conversationId: msg.conversationId,
+                role: msg.role,
+                content: chunks[i],
+                createdAt: msg.createdAt,
+                embedding: siblingEmb,
+                isChunk: true,
+              });
+            }
+          }
+
+          done++;
+          if (isMountedRef.current) setReEmbedProgress({ done, total });
+        }
+      }
+
+      invalidateRagPoolCache();
+      reEmbedAbortRef.current = null;
+      if (isMountedRef.current) { setReEmbedProgress(null); setStatus("ready"); }
+    } catch (err) {
+      reEmbedAbortRef.current = null;
+      if (!isMountedRef.current) return;
+      setReEmbedProgress(null);
+      if (!abort.signal.aborted) {
+        setError(String(err));
+        setStatus("error");
+      } else {
+        invalidateRagPoolCache();
+        setStatus("ready");
+      }
+    }
+  // conversationsRef used instead of conversations — see comment above.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [config]);
+
+  // ── RAG source viewer ─────────────────────────────────────────────────────
+  //
+  // Given a message's ragSourceIds, fetch the actual chunk text from the DB.
+  // Returns objects with source label, text preview, and the retrieval score
+  // stored in lastRagChunks (matched by id).
+
+  const getRagChunksForMessage = useCallback(async (ragSourceIds: string[]) => {
+    const [knowledgeChunks, messageChunks] = await Promise.all([
+      getKnowledgeChunksByIds(ragSourceIds),
+      getMessagesByIds(ragSourceIds),
+    ]);
+    // Scores are only available for the most recently generated message —
+    // lastRagChunks is overwritten on every new query. Only use scores when
+    // the requested IDs match the current lastRagChunks set; otherwise omit
+    // them rather than showing scores from a different query.
+    const lastIds = new Set(lastRagChunks.map((c) => c.id));
+    const idsMatch = ragSourceIds.length > 0 && ragSourceIds.every((id) => lastIds.has(id));
+    const scoreMap = idsMatch
+      ? new Map(lastRagChunks.map((c) => [c.id, c.score]))
+      : new Map<string, number>();
+    const results = [
+      ...knowledgeChunks.map((c) => ({
+        id: c.id,
+        source: c.source,
+        text: c.text,
+        type: "knowledge" as const,
+        score: scoreMap.get(c.id),
+      })),
+      ...messageChunks.map((m) => ({
+        id: m.id,
+        source: `Message (${m.role})`,
+        text: m.content,
+        type: "message" as const,
+        score: scoreMap.get(m.id),
+      })),
+    ];
+    // Sort by score descending if available
+    return results.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  }, [lastRagChunks]);
+
+  // ── Bookmarks ─────────────────────────────────────────────────────────────
+
+  const toggleBookmark = useCallback((messageId: string): void => {
+    const msg = messages.find((m) => m.id === messageId);
+    if (!msg) return;
+    const updated: Message = { ...msg, bookmarked: !msg.bookmarked };
+    // Optimistic update — revert on failure
+    setMessages((prev) => prev.map((m) => m.id === messageId ? updated : m));
+    saveMessage(updated).catch((e) => {
+      if (isMountedRef.current) {
+        setMessages((prev) => prev.map((m) => m.id === messageId ? msg : m));
+        setError(String(e));
+      }
+    });
+  }, [messages]);
+
+  const getBookmarks = useCallback((): Promise<Message[]> => {
+    return listBookmarkedMessages();
+  }, []);
+
+  // ── Export conversation ───────────────────────────────────────────────────
+
+  const exportConversation = useCallback((format: "markdown" | "json") => {
+    const conv = conversations.find((c) => c.id === activeConvId);
+    if (!conv || messages.length === 0) return;
+
+    let content: string;
+    let filename: string;
+    let mimeType: string;
+
+    if (format === "json") {
+      content = JSON.stringify({ conversation: conv, messages }, null, 2);
+      filename = `${conv.title.slice(0, 40).replace(/[^a-z0-9]/gi, "_")}.json`;
+      mimeType = "application/json";
+    } else {
+      const lines: string[] = [
+        `# ${conv.title}`,
+        `> Exported ${new Date().toLocaleString()}`,
+        "",
+      ];
+      for (const msg of messages) {
+        const role = msg.role === "user" ? "**You**" : "**Assistant**";
+        const time = new Date(msg.createdAt).toLocaleTimeString();
+        lines.push(`### ${role} — ${time}`);
+        lines.push(msg.content);
+        lines.push("");
+      }
+      content = lines.join("\n");
+      filename = `${conv.title.slice(0, 40).replace(/[^a-z0-9]/gi, "_")}.md`;
+      mimeType = "text/markdown";
+    }
+
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    a.click();
+    // Revoke after 30 s — Firefox initiates downloads asynchronously and may
+    // not start the transfer within 1 s for large exports, causing a silent
+    // empty download if the URL is revoked too early.
+    setTimeout(() => URL.revokeObjectURL(url), 30_000);
+  }, [conversations, activeConvId, messages]);
+
+  // ── Background notification ───────────────────────────────────────────────
+
+  const notifyIfHidden = useCallback((title: string, body: string) => {
+    if (document.visibilityState !== "hidden") return;
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "granted") {
+      new Notification(title, { body, icon: "/icons/icon.png" });
+    } else if (Notification.permission === "default") {
+      Notification.requestPermission().then((perm) => {
+        if (perm === "granted") new Notification(title, { body, icon: "/icons/icon.png" });
+      }).catch(() => { /* permission denied or API unavailable — safe to ignore */ });
+    }
+  }, []);
+
+  // ── Stop generation ──────────────────────────────────────────────────────
+
+  const stopGeneration = useCallback(() => {
+    abortControllerRef.current?.abort();
+    abortControllerRef.current = null;
+  }, []);
+
+  // ── Branch conversation from a message point ─────────────────────────────
+  //
+  // Creates a new conversation containing all messages up to and including
+  // the selected message, then switches to it.
+
+  const branchConversation = useCallback(async (messageId: string) => {
+    const idx = messages.findIndex((m) => m.id === messageId);
+    if (idx === -1) return;
+
+    const sourceConv = conversations.find((c) => c.id === activeConvId);
+    const branchMessages = messages.slice(0, idx + 1);
+    const branchTitle = `Branch: ${sourceConv?.title ?? "Conversation"}`;
+
+    const newConvId = await createConversation();
+    await renameConversation(newConvId, branchTitle);
+
+    // Save all branched messages under the new conversation ID.
+    // Strip embedding/chunkIds/isChunk so each message gets re-embedded fresh
+    // under the new conversation — the old chunk sibling IDs are invalid here.
+    for (const msg of branchMessages) {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const { embedding: _emb, chunkIds: _cids, isChunk: _ic, ...rest } = msg;
+      const branched: Message = { ...rest, id: uuidv4(), conversationId: newConvId };
+      await saveMessage(branched);
+      void embedAndSave(branched);
+    }
+
+    // Load the new conversation
+    await selectConversation(newConvId);
+  }, [messages, conversations, activeConvId, createConversation, renameConversation, selectConversation]);
+
+  // ── Edit a user message and regenerate from that point ───────────────────
+  //
+  // Truncates the message list to everything before the edited message,
+  // then re-sends the new content as if the user typed it fresh.
+
+  const editMessage = useCallback(async (messageId: string, newContent: string) => {
+    // Block edits while generation is in progress — deleting messages mid-stream
+    // would orphan the in-flight assistant response and corrupt the conversation.
+    if (sendingRef.current) return;
+    const idx = messages.findIndex((m) => m.id === messageId);
+    if (idx === -1) return;
+
+    // Delete the edited message and everything after it from the DB
+    const toDelete = messages.slice(idx);
+    await Promise.all(toDelete.map((m) => deleteMessage(m.id)));
+
+    // Update state to only keep messages before the edited one
+    const truncated = messages.slice(0, idx);
+    setMessages(truncated);
+
+    // Pass truncated array directly — React state update is async so the
+    // messages closure in sendMessage would still see the old array otherwise.
+    await sendMessage(newContent, undefined, truncated);
+  }, [messages, sendMessage]);
 
   // ── Knowledge base ───────────────────────────────────────────────────────
 
   const ingestText = useCallback(async (source: string, rawText: string) => {
-    setStatus("embedding");
-    const chunks = splitIntoChunks(rawText);
-    for (const text of chunks) {
-      const embedding = await embed(
-        text,
-        modelsLoaded.current ? EMBED_MODEL_ID : undefined,
-      );
-      const chunk: KnowledgeChunk = {
-        id: uuidv4(),
-        source,
-        text,
-        embedding,
-        createdAt: new Date().toISOString(),
-      };
-      await saveKnowledgeChunk(chunk);
-      setKnowledgeChunks((prev) => [chunk, ...prev]);
+    // Don't corrupt the status machine if generation is in progress.
+    if (sendingRef.current) {
+      if (isMountedRef.current) setError("Cannot ingest while a response is being generated.");
+      return;
     }
-    setStatus("ready");
-  }, []);
+    setStatus("embedding");
+    setError(null);
+    const savedIds: string[] = [];
+    try {
+      const chunks = splitIntoChunks(rawText, config?.chunkSize, config?.chunkOverlap);
+      const total = chunks.length;
+      if (isMountedRef.current) setIngestProgress({ done: 0, total, source });
+      for (let i = 0; i < chunks.length; i++) {
+        const text = chunks[i];
+        const embedding = await embed(
+          text,
+          modelsLoaded.current ? EMBED_MODEL_ID : undefined,
+        );
+        const chunk: KnowledgeChunk = {
+          id: uuidv4(),
+          source,
+          text,
+          embedding,
+          createdAt: new Date().toISOString(),
+        };
+        await saveKnowledgeChunk(chunk);
+        savedIds.push(chunk.id);
+        if (isMountedRef.current) {
+          setKnowledgeChunks((prev) => [chunk, ...prev]);
+          setIngestProgress({ done: i + 1, total, source });
+        }
+      }
+      if (isMountedRef.current) { setIngestProgress(null); setStatus("ready"); }
+    } catch (err) {
+      // Roll back any chunks saved before the failure
+      for (const id of savedIds) {
+        await deleteKnowledgeChunk(id).catch(() => {});
+      }
+      if (isMountedRef.current) {
+        setKnowledgeChunks((prev) => prev.filter((c) => !savedIds.includes(c.id)));
+        setIngestProgress(null);
+        setError(String(err));
+        setStatus("error");
+      }
+    }
+  }, [config]);
+
+  const ingestPdf = useCallback(async (file: File) => {
+    setStatus("embedding");
+    setError(null);
+    try {
+      const buffer = await file.arrayBuffer();
+      const text = await extractPdfText(buffer);
+      if (!text.trim()) throw new Error("No text found in PDF");
+      // ingestText owns status transitions from here
+      await ingestText(file.name, text);
+    } catch (err) {
+      // Only reached for pre-ingest failures (arrayBuffer, extractPdfText)
+      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+    }
+  }, [ingestText]);
+
+  const ingestUrl = useCallback(async (url: string) => {
+    setStatus("embedding");
+    setError(null);
+    try {
+      const { text, title } = await fetchUrlText(url);
+      if (!text.trim()) throw new Error("No text extracted from URL");
+      // ingestText owns status transitions from here
+      await ingestText(title || url, text);
+    } catch (err) {
+      // Only reached for pre-ingest failures (fetchUrlText, empty text)
+      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+    }
+  }, [ingestText]);
 
   const removeKnowledgeChunk = useCallback(async (id: string) => {
     await deleteKnowledgeChunk(id);
-    setKnowledgeChunks((prev) => prev.filter((c) => c.id !== id));
+    if (isMountedRef.current) setKnowledgeChunks((prev) => prev.filter((c) => c.id !== id));
   }, []);
+
+  const removeKnowledgeBySource = useCallback(async (source: string) => {
+    await deleteKnowledgeBySource(source);
+    if (isMountedRef.current) setKnowledgeChunks((prev) => prev.filter((c) => c.source !== source));
+  }, []);
+
+  const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
 
   return {
     status, error,
     config, conversations, activeConvId, messages, knowledgeChunks,
-    streamingContent, lastRagChunks,
+    streamingContent, streamingTokensPerSec, streamingTokenCount, lastRagChunks, lastToolExecutions,
     ragEnabled, setRagEnabled,
+    allTools: knowledgeSearchToolRef.current
+      ? [knowledgeSearchToolRef.current, ...ALL_TOOLS]
+      : ALL_TOOLS,
+    enabledToolIds, setEnabledToolIds,
     embeddingStatus, embeddingBackend, llmBackend,
+    activeLlmModelId, activeEmbedModelId,
+    agents, activeAgentId, activeAgent, setActiveAgentId,
     updateConfig,
     loadPreset,
     loadWebLlmModel, unloadWebLlmModel,
     configureApi, initEmbeddingEngine,
-    createConversation, selectConversation, renameConversation, removeConversation,
-    sendMessage,
-    ingestText, removeKnowledgeChunk,
+    loadLlmFromCache, loadEmbedFromCache,
+    retryInit,
+    createConversation, selectConversation, renameConversation, updateConversationInstruction, removeConversation,
+    sendMessage, stopGeneration, editMessage, branchConversation, exportConversation, searchConversations,
+    toggleBookmark, getBookmarks,
+    summarizeConversation,
+    getRagChunksForMessage,
+    reEmbedAll, cancelReEmbed, reEmbedProgress,
+    ingestProgress,
+    ingestText, ingestPdf, ingestUrl, removeKnowledgeChunk, removeKnowledgeBySource,
+    createAgent, updateAgent, removeAgent,
     clearError: () => setError(null),
   };
 }

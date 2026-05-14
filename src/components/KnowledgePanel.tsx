@@ -1,154 +1,298 @@
-import { useRef, useState } from "react";
+import { useRef, useState, useMemo, useEffect } from "react";
 import type { KnowledgeChunk, AppStatus } from "../lib/types";
 
 interface Props {
   chunks: KnowledgeChunk[];
   status: AppStatus;
   onIngest: (source: string, text: string) => Promise<void>;
+  onIngestPdf: (file: File) => Promise<void>;
+  onIngestUrl: (url: string) => Promise<void>;
   onDelete: (id: string) => void;
+  onDeleteBySource: (source: string) => void;
+  onReEmbedAll: () => void;
+  onCancelReEmbed: () => void;
+  reEmbedProgress: { done: number; total: number } | null;
+  ingestProgress: { done: number; total: number; source: string } | null;
   onClose: () => void;
 }
 
+type IngestTab = "text" | "file" | "url";
+
 export function KnowledgePanel({
-  chunks,
-  status,
-  onIngest,
-  onDelete,
-  onClose,
+  chunks, status, onIngest, onIngestPdf, onIngestUrl, onDelete, onDeleteBySource,
+  onReEmbedAll, onCancelReEmbed, reEmbedProgress, ingestProgress, onClose,
 }: Props) {
+  const [tab, setTab] = useState<IngestTab>("file");
   const [pasteText, setPasteText] = useState("");
   const [sourceName, setSourceName] = useState("");
+  const [urlInput, setUrlInput] = useState("");
   const [ingesting, setIngesting] = useState(false);
   const [ingestError, setIngestError] = useState<string | null>(null);
+  const [search, setSearch] = useState("");
+  const [dragOver, setDragOver] = useState(false);
+  const [deleteConfirmSource, setDeleteConfirmSource] = useState<string | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
-
-  const handleIngestText = async () => {
-    if (!pasteText.trim() || !sourceName.trim()) return;
-    setIngesting(true);
-    setIngestError(null);
-    try {
-      await onIngest(sourceName.trim(), pasteText.trim());
-      setPasteText("");
-      setSourceName("");
-    } catch (err) {
-      setIngestError(String(err));
-    } finally {
-      setIngesting(false);
-    }
-  };
-
-  const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    const text = await file.text();
-    setIngesting(true);
-    setIngestError(null);
-    try {
-      await onIngest(file.name, text);
-    } catch (err) {
-      setIngestError(String(err));
-    } finally {
-      setIngesting(false);
-      if (fileRef.current) fileRef.current.value = "";
-    }
-  };
+  const isMountedRef = useRef(true);
+  useEffect(() => { isMountedRef.current = true; return () => { isMountedRef.current = false; }; }, []);
 
   const isEmbedding = status === "embedding" || ingesting;
 
+  // Group chunks by source
+  const grouped = useMemo(() => {
+    const map = new Map<string, KnowledgeChunk[]>();
+    for (const c of chunks) {
+      if (!map.has(c.source)) map.set(c.source, []);
+      map.get(c.source)!.push(c);
+    }
+    return map;
+  }, [chunks]);
+
+  // Filter by search
+  const filteredSources = useMemo(() => {
+    const q = search.toLowerCase();
+    return Array.from(grouped.entries()).filter(([source, cs]) =>
+      !q || source.toLowerCase().includes(q) || cs.some((c) => c.text.toLowerCase().includes(q))
+    );
+  }, [grouped, search]);
+
+  const withError = async (fn: () => Promise<void>) => {
+    if (isMountedRef.current) { setIngesting(true); setIngestError(null); }
+    try { await fn(); }
+    catch (err) { if (isMountedRef.current) setIngestError(String(err)); }
+    finally { if (isMountedRef.current) setIngesting(false); }
+  };
+
+  const handleIngestText = () => withError(async () => {
+    if (!pasteText.trim() || !sourceName.trim()) return;
+    await onIngest(sourceName.trim(), pasteText.trim());
+    setPasteText(""); setSourceName("");
+  });
+
+  const handleIngestUrl = () => withError(async () => {
+    if (!urlInput.trim()) return;
+    await onIngestUrl(urlInput.trim());
+    setUrlInput("");
+  });
+
+  const handleFiles = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    // Collect errors from all files rather than clearing per-file, so a
+    // failure on file N isn't silently overwritten by file N+1 succeeding.
+    const errors: string[] = [];
+    if (isMountedRef.current) { setIngesting(true); setIngestError(null); }
+    for (const file of Array.from(files)) {
+      try {
+        if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
+          await onIngestPdf(file);
+        } else {
+          const text = await file.text();
+          await onIngest(file.name, text);
+        }
+      } catch (err) {
+        errors.push(`${file.name}: ${String(err)}`);
+      }
+    }
+    if (isMountedRef.current) {
+      setIngesting(false);
+      if (errors.length > 0) setIngestError(errors.join("\n"));
+    }
+    if (fileRef.current) fileRef.current.value = "";
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+    handleFiles(e.dataTransfer.files).catch((err) => setIngestError(String(err)));
+  };
+
   return (
     <div className="panel-overlay" onClick={onClose}>
-      <div className="panel" onClick={(e) => e.stopPropagation()}>
+      <div className="panel panel-wide" onClick={(e) => e.stopPropagation()}>
         <div className="panel-header">
           <h2>📚 Knowledge Base</h2>
-          <button className="icon-btn" onClick={onClose}>✕</button>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {ingestProgress && (
+              <span className="re-embed-progress" aria-live="polite">
+                Embedding "{ingestProgress.source}" — {ingestProgress.done}/{ingestProgress.total} chunks…
+              </span>
+            )}
+            {reEmbedProgress ? (
+              <span className="re-embed-progress" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                Re-embedding {reEmbedProgress.done}/{reEmbedProgress.total}…
+                <button
+                  className="btn-sm secondary"
+                  onClick={onCancelReEmbed}
+                  title="Cancel re-embedding"
+                >
+                  ✕ Cancel
+                </button>
+              </span>
+            ) : (
+              <button
+                className="btn-sm secondary"
+                onClick={onReEmbedAll}
+                disabled={chunks.length === 0 || status === "embedding"}
+                title="Re-compute all embeddings with the current model"
+              >
+                ↺ Re-embed all
+              </button>
+            )}
+            <button className="icon-btn" onClick={onClose}>✕</button>
+          </div>
         </div>
 
         <div className="panel-body">
-          {/* Ingest section */}
+          {/* ── Ingest section ── */}
           <section className="panel-section">
             <h3>Add documents</h3>
             <p className="hint">
-              Text is split into chunks, embedded with your LiteRT model, and
-              stored in CouchbaseLite for offline retrieval.
+              Text is split into chunks, embedded, and stored in CouchbaseLite for offline retrieval.
             </p>
 
-            <label className="field-label">Source name</label>
-            <input
-              className="field-input"
-              placeholder="e.g. my-notes.txt"
-              value={sourceName}
-              onChange={(e) => setSourceName(e.target.value)}
-              disabled={isEmbedding}
-            />
+            {/* Tab switcher */}
+            <div className="kb-tabs">
+              {(["file", "url", "text"] as IngestTab[]).map((t) => (
+                <button
+                  key={t}
+                  className={`kb-tab ${tab === t ? "active" : ""}`}
+                  onClick={() => setTab(t)}
+                >
+                  {t === "file" ? "📄 File / PDF" : t === "url" ? "🌐 URL" : "✏️ Paste text"}
+                </button>
+              ))}
+            </div>
 
-            <label className="field-label">Paste text</label>
-            <textarea
-              className="field-textarea"
-              rows={5}
-              placeholder="Paste document text here…"
-              value={pasteText}
-              onChange={(e) => setPasteText(e.target.value)}
-              disabled={isEmbedding}
-            />
-
-            <div className="row-gap">
-              <button
-                className="btn-primary"
-                onClick={handleIngestText}
-                disabled={isEmbedding || !pasteText.trim() || !sourceName.trim()}
-              >
-                {isEmbedding ? "Embedding…" : "Embed & store"}
-              </button>
-
-              <span className="or-divider">or</span>
-
-              <button
-                className="btn-secondary"
+            {/* File / PDF tab */}
+            {tab === "file" && (
+              <div
+                className={`drop-zone ${dragOver ? "drag-over" : ""}`}
+                onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
+                onDragLeave={() => setDragOver(false)}
+                onDrop={handleDrop}
                 onClick={() => fileRef.current?.click()}
-                disabled={isEmbedding}
               >
-                Upload .txt file
-              </button>
+                <span className="drop-zone-icon">📂</span>
+                <span className="drop-zone-label">
+                  {isEmbedding ? "Embedding…" : "Drop files here or click to browse"}
+                </span>
+                <span className="drop-zone-hint">.txt · .md · .csv · .pdf</span>
+                <input
+                  ref={fileRef}
+                  type="file"
+                  accept=".txt,.md,.csv,.pdf"
+                  multiple
+                  style={{ display: "none" }}
+                  onChange={(e) => { handleFiles(e.target.files).catch((err) => setIngestError(String(err))); }}
+                />
+              </div>
+            )}
+
+            {/* URL tab */}
+            {tab === "url" && (
+              <div className="kb-url-row">
+                <input
+                  className="field-input"
+                  placeholder="https://example.com/article"
+                  value={urlInput}
+                  onChange={(e) => setUrlInput(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleIngestUrl(); }}
+                  disabled={isEmbedding}
+                />
+                <button
+                  className="btn-sm"
+                  onClick={handleIngestUrl}
+                  disabled={isEmbedding || !urlInput.trim()}
+                >
+                  {isEmbedding ? "Fetching…" : "Fetch & embed"}
+                </button>
+              </div>
+            )}
+
+            {/* Paste text tab */}
+            {tab === "text" && (
+              <>
+                <label className="field-label">Source name</label>
+                <input
+                  className="field-input"
+                  placeholder="e.g. my-notes.txt"
+                  value={sourceName}
+                  onChange={(e) => setSourceName(e.target.value)}
+                  disabled={isEmbedding}
+                />
+                <label className="field-label" style={{ marginTop: 10 }}>Text</label>
+                <textarea
+                  className="field-textarea"
+                  rows={5}
+                  placeholder="Paste document text here…"
+                  value={pasteText}
+                  onChange={(e) => setPasteText(e.target.value)}
+                  disabled={isEmbedding}
+                />
+                <button
+                  className="btn-sm"
+                  style={{ marginTop: 8 }}
+                  onClick={handleIngestText}
+                  disabled={isEmbedding || !pasteText.trim() || !sourceName.trim()}
+                >
+                  {isEmbedding ? "Embedding…" : "Embed & store"}
+                </button>
+              </>
+            )}
+
+            {ingestError && <p className="error-text" style={{ marginTop: 8 }}>{ingestError}</p>}
+          </section>
+
+          {/* ── Chunk list ── */}
+          <section className="panel-section">
+            <div className="kb-list-header">
+              <h3>
+                {chunks.length} chunk{chunks.length !== 1 ? "s" : ""}
+                {" · "}
+                {grouped.size} source{grouped.size !== 1 ? "s" : ""}
+              </h3>
               <input
-                ref={fileRef}
-                type="file"
-                accept=".txt,.md,.csv"
-                style={{ display: "none" }}
-                onChange={handleFileChange}
+                className="sidebar-search"
+                style={{ width: 180 }}
+                placeholder="Filter…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
               />
             </div>
 
-            {ingestError && (
-              <p className="error-text">{ingestError}</p>
-            )}
-          </section>
-
-          {/* Chunk list */}
-          <section className="panel-section">
-            <h3>Stored chunks ({chunks.length})</h3>
-            {chunks.length === 0 ? (
-              <p className="hint">No chunks yet. Add a document above.</p>
+            {filteredSources.length === 0 ? (
+              <p className="hint">{search ? "No matches." : "No chunks yet. Add a document above."}</p>
             ) : (
-              <ul className="chunk-list">
-                {chunks.map((c) => (
-                  <li key={c.id} className="chunk-item">
-                    <div className="chunk-meta">
-                      <span className="chunk-source">{c.source}</span>
-                      <span className="chunk-date">
-                        {new Date(c.createdAt).toLocaleDateString()}
-                      </span>
+              <ul className="source-list">
+                {filteredSources.map(([source, sourceChunks]) => (
+                  <li key={source} className="source-item">
+                    <div className="source-header">
+                      <span className="source-name" title={source}>{source}</span>
+                      <span className="source-count">{sourceChunks.length} chunk{sourceChunks.length !== 1 ? "s" : ""}</span>
+                      {deleteConfirmSource === source ? (
+                        <div className="source-delete-confirm">
+                          <button className="btn-sm danger" onClick={() => { onDeleteBySource(source); setDeleteConfirmSource(null); }}>
+                            Delete all
+                          </button>
+                          <button className="btn-sm secondary" onClick={() => setDeleteConfirmSource(null)}>Cancel</button>
+                        </div>
+                      ) : (
+                        <button className="icon-btn danger" title="Delete all chunks from this source"
+                          onClick={() => setDeleteConfirmSource(source)}>🗑</button>
+                      )}
                     </div>
-                    <p className="chunk-preview">
-                      {c.text.slice(0, 120)}
-                      {c.text.length > 120 ? "…" : ""}
-                    </p>
-                    <button
-                      className="chunk-delete"
-                      onClick={() => onDelete(c.id)}
-                      title="Remove chunk"
-                    >
-                      ✕
-                    </button>
+                    <ul className="chunk-list">
+                      {sourceChunks.map((c) => (
+                        <li key={c.id} className="chunk-item">
+                          <p className="chunk-preview">
+                            {c.text.slice(0, 140)}{c.text.length > 140 ? "…" : ""}
+                          </p>
+                          <div className="chunk-meta">
+                            <span className="chunk-date">{new Date(c.createdAt).toLocaleDateString()}</span>
+                            <button className="chunk-delete" onClick={() => onDelete(c.id)} title="Remove chunk">✕</button>
+                          </div>
+                        </li>
+                      ))}
+                    </ul>
                   </li>
                 ))}
               </ul>

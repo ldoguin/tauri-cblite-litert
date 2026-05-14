@@ -1,16 +1,25 @@
-import { useState } from "react";
+import { useState, useCallback, useRef, useMemo, useEffect } from "react";
+import { useTheme } from "./hooks/useTheme";
 import { useChat } from "./hooks/useChat";
+import { useVoiceInput } from "./hooks/useVoiceInput";
+import { useWakeWord } from "./hooks/useWakeWord";
+import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { KnowledgePanel } from "./components/KnowledgePanel";
 import { SettingsPanel } from "./components/SettingsPanel";
+import { ToolsPanel } from "./components/ToolsPanel";
+import { AgentsPanel } from "./components/AgentsPanel";
+import { ModelManagerPanel } from "./components/ModelManagerPanel";
+import { SearchPanel } from "./components/SearchPanel";
 import { WebGpuBanner } from "./components/WebGpuBanner";
 import { isTauri, MODEL_PRESETS } from "./lib/llm";
+import { MODEL_CATALOGUE } from "./lib/modelCache";
 import type { EmbeddingStatus, RetrievedChunk } from "./lib/rag";
 import type { LlmBackend, ApiConfig, WebLlmOptions, ModelPreset } from "./lib/llm";
 import "./App.css";
 
-type Modal = "knowledge" | "settings" | null;
+type Modal = "knowledge" | "settings" | "tools" | "agents" | "models" | "search" | null;
 type ToolbarPanel = "none" | "presets" | "llm" | "api" | "embed";
 
 // ── Backend status badges ──────────────────────────────────────────────────
@@ -43,18 +52,29 @@ function LlmBadge({ backend }: { backend: LlmBackend }) {
 function Toolbar({
   embeddingStatus, llmBackend, isWebLlmLoaded,
   ragEnabled, onRagToggle,
+  activeToolCount, onShowTools,
+  theme, onToggleTheme,
+  wakeWordState, onToggleWakeWord,
   onLoadPreset, onLoadWebLlm, onUnloadWebLlm, onConfigureApi, onInitEmbedModel,
+  onShowModels,
 }: {
   embeddingStatus: EmbeddingStatus | null;
   llmBackend: LlmBackend;
   isWebLlmLoaded: boolean;
   ragEnabled: boolean;
   onRagToggle: (v: boolean) => void;
+  activeToolCount: number;
+  onShowTools: () => void;
+  theme: "dark" | "light";
+  onToggleTheme: () => void;
+  wakeWordState: import("./hooks/useWakeWord").WakeWordState;
+  onToggleWakeWord: () => void;
   onLoadPreset: (preset: ModelPreset) => void;
   onLoadWebLlm: (opts: WebLlmOptions) => void;
   onUnloadWebLlm: () => void;
   onConfigureApi: (cfg: ApiConfig) => void;
   onInitEmbedModel: (url: string) => void;
+  onShowModels: () => void;
 }) {
   const [panel, setPanel] = useState<ToolbarPanel>("none");
   const [llmUrl, setLlmUrl]         = useState("");
@@ -64,18 +84,22 @@ function Toolbar({
   const [apiModel, setApiModel]     = useState("llama-3.1-8b-instant");
   const [embedUrl, setEmbedUrl]     = useState("");
   const [loadingPresetId, setLoadingPresetId] = useState<string | null>(null);
+  const [toolbarError, setToolbarError] = useState<string | null>(null);
 
   const handleLoadLlm = async () => {
     if (!llmUrl.trim()) return;
     setLlmLoading(true);
+    setToolbarError(null);
     try { await onLoadWebLlm({ modelUrl: llmUrl.trim() }); setPanel("none"); }
-    catch (e) { alert("Failed to load LLM: " + String(e)); }
+    catch (e) { setToolbarError("Failed to load LLM: " + String(e)); }
     finally { setLlmLoading(false); }
   };
 
   const handleLoadPreset = async (preset: ModelPreset) => {
     setLoadingPresetId(preset.id);
+    setToolbarError(null);
     try { await onLoadPreset(preset); setPanel("none"); }
+    catch (e) { setToolbarError("Failed to load preset: " + String(e)); }
     finally { setLoadingPresetId(null); }
   };
 
@@ -92,6 +116,37 @@ function Toolbar({
           />
           RAG
         </label>
+        <button
+          className={`tools-badge-btn ${activeToolCount > 0 ? "active" : ""}`}
+          onClick={onShowTools}
+          title="Manage tools"
+        >
+          🛠️ {activeToolCount > 0 ? `${activeToolCount} tool${activeToolCount > 1 ? "s" : ""}` : "Tools"}
+        </button>
+        <button
+          className={`wake-word-btn ${wakeWordState === "listening" ? "listening" : ""} ${wakeWordState === "detected" ? "detected" : ""} ${wakeWordState === "loading" ? "loading" : ""} ${wakeWordState === "error" ? "error" : ""}`}
+          onClick={onToggleWakeWord}
+          title={
+            wakeWordState === "idle"     ? "Enable wake word detection" :
+            wakeWordState === "loading"  ? "Loading Porcupine…" :
+            wakeWordState === "listening"? "Wake word active — click to stop" :
+            wakeWordState === "detected" ? "Wake word detected!" :
+            "Wake word error — click to retry"
+          }
+        >
+          {wakeWordState === "loading"   ? "⏳" :
+           wakeWordState === "listening" ? "👂" :
+           wakeWordState === "detected"  ? "🔔" :
+           wakeWordState === "error"     ? "⚠️" :
+           "👂"}
+          <span className="wake-word-label">
+            {wakeWordState === "idle"     ? "Wake" :
+             wakeWordState === "loading"  ? "Loading…" :
+             wakeWordState === "listening"? "Listening" :
+             wakeWordState === "detected" ? "Detected!" :
+             "Error"}
+          </span>
+        </button>
       </div>
 
       <div className="toolbar-right">
@@ -183,9 +238,21 @@ function Toolbar({
         {/* ── Default buttons ── */}
         {panel === "none" && (
           <>
-            <button className="btn-sm preset-btn" onClick={() => setPanel("presets")}>
-              ⚡ Quick load
+            <button
+              className="btn-sm icon-only"
+              onClick={onToggleTheme}
+              title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+            >
+              {theme === "dark" ? "☀️" : "🌙"}
             </button>
+            <button className="btn-sm" onClick={onShowModels} title="Download and manage models">
+              📦 Models
+            </button>
+            {!isTauri() && (
+              <button className="btn-sm preset-btn" onClick={() => setPanel("presets")}>
+                ⚡ Quick load
+              </button>
+            )}
             {!isTauri() && (
               isWebLlmLoaded
                 ? <button className="btn-sm danger" onClick={onUnloadWebLlm}>Unload LLM</button>
@@ -199,6 +266,12 @@ function Toolbar({
             )}
           </>
         )}
+        {toolbarError && (
+          <div className="error-bar toolbar-error">
+            {toolbarError}
+            <button className="icon-btn" onClick={() => setToolbarError(null)}>✕</button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -211,8 +284,8 @@ function RagDebugPanel({ chunks }: { chunks: RetrievedChunk[] }) {
   return (
     <div className="rag-debug">
       <div className="rag-debug-title">RAG — retrieved context</div>
-      {chunks.map((c, i) => (
-        <div key={i} className="rag-debug-chunk">
+      {chunks.map((c) => (
+        <div key={c.id} className="rag-debug-chunk">
           <span className="rag-score">{c.score.toFixed(3)}</span>
           <span className={`rag-type-badge rag-type-${c.type}`}>{c.type}</span>
           <span className="rag-source">{c.source}</span>
@@ -229,15 +302,153 @@ function RagDebugPanel({ chunks }: { chunks: RetrievedChunk[] }) {
 
 export default function App() {
   const chat = useChat();
+  const { theme, toggleTheme } = useTheme();
   const [modal, setModal] = useState<Modal>(null);
   const [ragDebugVisible, setRagDebugVisible] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [voiceInput, setVoiceInput] = useState("");
+  const [voiceError, setVoiceError] = useState<string | null>(null);
+  const chatInputRef = useRef<HTMLTextAreaElement>(null);
+  // Holds the cancel function for any in-flight jumpToMessage retry loop so
+  // pending timers are cleared when the component unmounts.
+  const jumpCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => { jumpCleanupRef.current?.(); }, []);
+  const [bookmarks, setBookmarks] = useState<import("./lib/types").Message[]>([]);
+  const [storageWarning, setStorageWarning] = useState(false);
 
-  const handleNewConversation = async () => {
+  useEffect(() => {
+    const handler = () => setStorageWarning(true);
+    window.addEventListener("rag-chatbot:storage-full", handler);
+    return () => window.removeEventListener("rag-chatbot:storage-full", handler);
+  }, []);
+
+  // Load bookmarks whenever the search/bookmarks panel opens
+  const openSearch = useCallback(() => {
+    chat.getBookmarks().then((bm) => {
+      setBookmarks(bm);
+      setModal("search");
+    }).catch(() => {
+      // Bookmarks unavailable — open panel with empty list
+      setBookmarks([]);
+      setModal("search");
+    });
+  }, [chat.getBookmarks]);
+
+  // Keep the bookmarks list fresh while the search panel is open.
+  // chat.messages changes whenever toggleBookmark is called, so this effect
+  // re-fetches and reflects additions without requiring a panel close/reopen.
+  useEffect(() => {
+    if (modal !== "search") return;
+    chat.getBookmarks().then(setBookmarks).catch(() => {});
+  }, [modal, chat.messages, chat.getBookmarks]);
+
+  // Jump to a message: select the conversation, then scroll to the message element.
+  // Uses a retry loop because the message list may not be rendered immediately
+  // after selectConversation resolves (React batches state updates).
+  const jumpToMessage = useCallback(async (convId: string, messageId: string) => {
+    await chat.selectConversation(convId);
+    const targetId = `msg-${messageId}`;
+    let attempts = 0;
+    // Track pending timer so it can be cancelled if the component unmounts
+    // while retries are still in flight (cleanup registered in jumpCleanupRef).
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
+    jumpCleanupRef.current = () => {
+      cancelled = true;
+      if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null; }
+    };
+
+    const tryScroll = () => {
+      if (cancelled) return;
+      const el = document.getElementById(targetId);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        el.classList.add("msg-highlight");
+        retryTimer = setTimeout(() => { retryTimer = null; el.classList.remove("msg-highlight"); }, 1500);
+      } else if (attempts < 10) {
+        attempts++;
+        retryTimer = setTimeout(() => { retryTimer = null; tryScroll(); }, 100);
+      }
+    };
+    // First attempt after two animation frames to let React flush
+    requestAnimationFrame(() => requestAnimationFrame(tryScroll));
+  }, [chat.selectConversation]);
+
+  // Lifted voice input — shared between wake word trigger and ChatPane
+  const voice = useVoiceInput({
+    onResult: useCallback((text: string) => {
+      setVoiceInput((prev) => (prev ? `${prev} ${text}` : text));
+      setVoiceError(null);
+    }, []),
+    onError: useCallback((msg: string) => setVoiceError(msg), []),
+    whisperModelId: chat.config?.whisperModelId || undefined,
+  });
+
+  const handleNewConversation = useCallback(async () => {
     const id = await chat.createConversation();
     await chat.selectConversation(id);
-  };
+  }, [chat.createConversation, chat.selectConversation]);
 
-  if (chat.status === "loading-models" && !chat.config) {
+  // Keyboard shortcuts
+  useKeyboardShortcuts(useMemo(() => ({
+    onNewConversation: handleNewConversation,
+    onFocusInput: () => chatInputRef.current?.focus(),
+    onOpenSearch: openSearch,
+    onOpenKnowledge: () => setModal("knowledge"),
+    onOpenAgents: () => setModal("agents"),
+    onOpenSettings: () => setModal("settings"),
+    onEscape: () => {
+      if (modal) { setModal(null); return; }
+      if (chat.status === "generating") chat.stopGeneration();
+    },
+    onStopGeneration: () => chat.stopGeneration(),
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), [modal, chat.status]));
+
+  // Wake word — triggers voice.start() when keyword detected
+  const wakeWord = useWakeWord({
+    accessKey: chat.config?.porcupineAccessKey ?? "",
+    keyword: chat.config?.porcupineKeyword ?? "Jarvis",
+    sensitivity: chat.config?.porcupineSensitivity ?? 0.5,
+    onDetected: useCallback(() => {
+      // Check state and workerStatus individually so this callback isn't
+      // recreated on every voice state change (the whole `voice` object
+      // is a new reference each render).
+      if (voice.state === "idle" && voice.workerStatus !== "loading") voice.start();
+    }, [voice.state, voice.workerStatus, voice.start]),
+    onError: useCallback((msg: string) => setVoiceError(msg), []),
+  });
+
+  // Derive context window length in priority order:
+  //   1. config.contextLength (user-set or auto-set when loading from catalogue)
+  //   2. catalogue entry contextLength (for the active model ID)
+  //   3. 0 — bar hidden
+  // maxTokens is the generation output limit, not the context window size,
+  // so it is no longer used as a fallback here.
+  const contextLength = useMemo(() => {
+    if (chat.config?.contextLength) return chat.config.contextLength;
+    if (chat.activeLlmModelId) {
+      const entry = MODEL_CATALOGUE.find((m) => m.id === chat.activeLlmModelId);
+      if (entry?.contextLength) return entry.contextLength;
+    }
+    return 0;
+  }, [chat.activeLlmModelId, chat.config?.contextLength]);
+
+  // Active system prompt for context window calculation — mirrors the priority
+  // order used in sendMessage: agent > conversation instruction > default.
+  const activeSystemPrompt = useMemo(() => {
+    const activeConv = chat.conversations.find((c) => c.id === chat.activeConvId);
+    return (
+      chat.activeAgent?.systemPrompt ??
+      activeConv?.systemInstruction ??
+      "You are a helpful assistant. Answer using the provided context when relevant."
+    );
+  }, [chat.activeAgent, chat.conversations, chat.activeConvId]);
+
+  // Show splash for the full initial load (config is set mid-init, so we
+  // can't use !config as the gate — check for conversations not yet loaded).
+  const isInitialising = chat.status === "loading-models" && chat.conversations.length === 0;
+  if (isInitialising) {
     return (
       <div className="splash">
         <div className="spinner" />
@@ -248,18 +459,41 @@ export default function App() {
 
   return (
     <div className="app-shell">
-      <Sidebar
-        conversations={chat.conversations}
-        activeConvId={chat.activeConvId}
-        onSelect={chat.selectConversation}
-        onCreate={handleNewConversation}
-        onDelete={chat.removeConversation}
-        onRename={chat.renameConversation}
-        onShowKnowledge={() => setModal("knowledge")}
-        onShowSettings={() => setModal("settings")}
-      />
+      {/* Mobile overlay — closes sidebar when tapping outside */}
+      {sidebarOpen && (
+        <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
+      )}
+      <div className={`sidebar-wrap ${sidebarOpen ? "open" : ""}`}>
+        <Sidebar
+          conversations={chat.conversations}
+          activeConvId={chat.activeConvId}
+          onSelect={(id) => { chat.selectConversation(id); setSidebarOpen(false); }}
+          onCreate={() => { handleNewConversation().catch((e) => console.error("[App] new conversation failed:", e)); setSidebarOpen(false); }}
+          onDelete={chat.removeConversation}
+          onRename={chat.renameConversation}
+          onUpdateInstruction={chat.updateConversationInstruction}
+          onExport={chat.exportConversation}
+          onSearch={chat.searchConversations}
+          onShowKnowledge={() => { setModal("knowledge"); setSidebarOpen(false); }}
+          onShowAgents={() => { setModal("agents"); setSidebarOpen(false); }}
+          onShowTools={() => { setModal("tools"); setSidebarOpen(false); }}
+          onShowSettings={() => { setModal("settings"); setSidebarOpen(false); }}
+          onShowSearch={() => { openSearch(); setSidebarOpen(false); }}
+          onSummarise={() => { chat.summarizeConversation(); setSidebarOpen(false); }}
+          isGenerating={chat.status === "generating"}
+          activeAgent={chat.activeAgent}
+        />
+      </div>
 
       <main className="main-area">
+        <button
+          className="sidebar-hamburger"
+          onClick={() => setSidebarOpen((v) => !v)}
+          title="Toggle sidebar"
+          aria-label="Toggle sidebar"
+        >
+          ☰
+        </button>
         <WebGpuBanner />
         <Toolbar
           embeddingStatus={chat.embeddingStatus}
@@ -267,11 +501,18 @@ export default function App() {
           isWebLlmLoaded={chat.llmBackend === "mediapipe"}
           ragEnabled={chat.ragEnabled}
           onRagToggle={chat.setRagEnabled}
+          activeToolCount={chat.enabledToolIds.size}
+          onShowTools={() => setModal("tools")}
+          theme={theme}
+          onToggleTheme={toggleTheme}
+          wakeWordState={wakeWord.state}
+          onToggleWakeWord={() => { wakeWord.toggle().catch((e) => setVoiceError(String(e))); }}
           onLoadPreset={chat.loadPreset}
           onLoadWebLlm={chat.loadWebLlmModel}
           onUnloadWebLlm={chat.unloadWebLlmModel}
           onConfigureApi={chat.configureApi}
           onInitEmbedModel={chat.initEmbeddingEngine}
+          onShowModels={() => setModal("models")}
         />
 
         {(chat.status === "loading-models" || chat.status === "embedding") && (
@@ -281,10 +522,21 @@ export default function App() {
           </div>
         )}
 
+        {storageWarning && (
+          <div className="error-bar" role="alert">
+            ⚠️ Browser storage is full — data is in memory only and will be lost on reload.
+            Delete old conversations or knowledge chunks to free space.
+            <button onClick={() => setStorageWarning(false)} aria-label="Dismiss storage warning">✕</button>
+          </div>
+        )}
+
         {chat.error && (
-          <div className="error-bar">
+          <div className="error-bar" role="alert">
             ⚠️ {chat.error}
-            <button onClick={chat.clearError}>✕</button>
+            {chat.status === "error" && (
+              <button onClick={chat.retryInit} style={{ marginLeft: "0.5rem" }}>Retry</button>
+            )}
+            <button onClick={chat.clearError} aria-label="Dismiss error">✕</button>
           </div>
         )}
 
@@ -302,28 +554,114 @@ export default function App() {
         <ChatPane
           messages={chat.messages}
           streamingContent={chat.streamingContent}
+          streamingTokensPerSec={chat.streamingTokensPerSec}
           status={chat.status}
+          voice={voice}
+          voiceInput={voiceInput}
+          voiceError={voiceError}
+          onVoiceInputChange={setVoiceInput}
+          onVoiceErrorDismiss={() => setVoiceError(null)}
           onSend={chat.sendMessage}
-          onNewConversation={handleNewConversation}
+          onStop={chat.stopGeneration}
+          onEdit={chat.editMessage}
+          onBranch={chat.branchConversation}
+          onBookmark={chat.toggleBookmark}
+          onFetchRagChunks={chat.getRagChunksForMessage}
+          inputRef={chatInputRef}
+          ragChunks={chat.lastRagChunks}
+          systemPrompt={activeSystemPrompt}
+          contextLength={contextLength}
+          maxTokens={chat.config?.maxTokens}
+          tokensGenerated={chat.streamingTokenCount}
         />
       </main>
 
       {modal === "knowledge" && chat.config && (
-        <KnowledgePanel
-          chunks={chat.knowledgeChunks}
-          status={chat.status}
-          onIngest={chat.ingestText}
-          onDelete={chat.removeKnowledgeChunk}
-          onClose={() => setModal(null)}
-        />
+        <div role="dialog" aria-modal="true" aria-label="Knowledge Base">
+          <KnowledgePanel
+            chunks={chat.knowledgeChunks}
+            status={chat.status}
+            onIngest={chat.ingestText}
+            onIngestPdf={chat.ingestPdf}
+            onIngestUrl={chat.ingestUrl}
+            onDelete={chat.removeKnowledgeChunk}
+            onDeleteBySource={chat.removeKnowledgeBySource}
+            onReEmbedAll={chat.reEmbedAll}
+            onCancelReEmbed={chat.cancelReEmbed}
+            reEmbedProgress={chat.reEmbedProgress}
+            ingestProgress={chat.ingestProgress}
+            onClose={() => setModal(null)}
+          />
+        </div>
       )}
 
       {modal === "settings" && chat.config && (
-        <SettingsPanel
-          config={chat.config}
-          onSave={chat.updateConfig}
-          onClose={() => setModal(null)}
-        />
+        <div role="dialog" aria-modal="true" aria-label="Settings">
+          <SettingsPanel
+            config={chat.config}
+            onSave={chat.updateConfig}
+            onClose={() => setModal(null)}
+          />
+        </div>
+      )}
+
+      {modal === "agents" && (
+        <div role="dialog" aria-modal="true" aria-label="Agents">
+          <AgentsPanel
+            agents={chat.agents}
+            activeAgentId={chat.activeAgentId}
+            onSelect={chat.setActiveAgentId}
+            onCreate={chat.createAgent}
+            onUpdate={chat.updateAgent}
+            onDelete={chat.removeAgent}
+            onClose={() => setModal(null)}
+          />
+        </div>
+      )}
+
+      {modal === "tools" && (
+        <div role="dialog" aria-modal="true" aria-label="Tools">
+          <ToolsPanel
+            allTools={chat.allTools}
+            enabledToolIds={chat.enabledToolIds}
+            onToggle={(id, enabled) => {
+              const next = new Set(chat.enabledToolIds);
+              if (enabled) next.add(id);
+              else next.delete(id);
+              chat.setEnabledToolIds(next);
+            }}
+            lastExecutions={chat.lastToolExecutions}
+            onClose={() => setModal(null)}
+          />
+        </div>
+      )}
+
+      {modal === "models" && (
+        <div role="dialog" aria-modal="true" aria-label="Model Manager">
+          <ModelManagerPanel
+            activeLlmId={chat.activeLlmModelId ?? undefined}
+            activeEmbedId={chat.activeEmbedModelId ?? undefined}
+            onLoadLlm={chat.loadLlmFromCache}
+            onLoadEmbed={chat.loadEmbedFromCache}
+            onClose={() => setModal(null)}
+          />
+        </div>
+      )}
+
+      {modal === "search" && (
+        <div role="dialog" aria-modal="true" aria-label="Search">
+          <SearchPanel
+            onSearch={chat.searchConversations}
+            onJump={jumpToMessage}
+            bookmarks={bookmarks}
+            onJumpBookmark={jumpToMessage}
+            onRemoveBookmark={(id) => {
+              chat.toggleBookmark(id);
+              setBookmarks((prev) => prev.filter((m) => m.id !== id));
+            }}
+            onClose={() => setModal(null)}
+          />
+        </div>
       )}
     </div>
   );
