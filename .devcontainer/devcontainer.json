@@ -17,4 +17,11 @@
     //     "moby": false
     //   }
     // }
+
+	// Download libGemmaModelConstraintProvider.so for Linux x86_64.
+	// This library is a hard runtime dependency of libLiteRtLmC.so but is
+	// absent from the litert-sys 0.2.1 Linux prebuilt list. It must be
+	// fetched from the LiteRT-LM LFS release and placed in the litert-sys
+	// cache dir so LD_LIBRARY_PATH (set in the Dockerfile) can find it.
+	"postCreateCommand": "bash .devcontainer/fetch-litert-extras.sh"
 }
