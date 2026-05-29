@@ -4,6 +4,7 @@ import { useChat } from "./hooks/useChat";
 import type { SidebarSection } from "./components/Sidebar";
 import { useVoiceInput } from "./hooks/useVoiceInput";
 import { useWakeWord } from "./hooks/useWakeWord";
+import { useTts } from "./hooks/useTts";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
@@ -54,6 +55,7 @@ function Toolbar({
   ragEnabled, onRagToggle,
   theme, onToggleTheme,
   wakeWordState, onToggleWakeWord,
+  ttsEnabled, ttsState, ttsErrorMsg, onToggleTts,
   onLoadPreset, onLoadWebLlm, onUnloadWebLlm, onConfigureApi, onInitEmbedModel,
   onShowModels,
 }: {
@@ -66,6 +68,10 @@ function Toolbar({
   onToggleTheme: () => void;
   wakeWordState: import("./hooks/useWakeWord").WakeWordState;
   onToggleWakeWord: () => void;
+  ttsEnabled: boolean;
+  ttsState: import("./hooks/useTts").TtsState;
+  ttsErrorMsg: string | null;
+  onToggleTts: () => void;
   onLoadPreset: (preset: ModelPreset) => void;
   onLoadWebLlm: (opts: WebLlmOptions) => void;
   onUnloadWebLlm: () => void;
@@ -135,6 +141,24 @@ function Toolbar({
              wakeWordState === "listening"? "Listening" :
              wakeWordState === "detected" ? "Detected!" :
              "Error"}
+          </span>
+        </button>
+        <button
+          className={`wake-word-btn ${
+            !ttsEnabled ? "" :
+            ttsState === "speaking" ? "listening" :
+            ttsState === "loading"  ? "loading" :
+            ttsState === "error"    ? "error" :
+            "detected"
+          }`}
+          onClick={onToggleTts}
+        >
+          {ttsState === "loading" ? "⏳" : ttsState === "speaking" ? "🔊" : ttsState === "error" ? "⚠️" : "🔈"}
+          <span className="wake-word-label">
+            {ttsState === "loading"  ? "Loading…"  :
+             ttsState === "speaking" ? "Speaking"  :
+             ttsState === "error"    ? `Err: ${(ttsErrorMsg ?? "unknown").slice(0, 50)}` :
+             ttsEnabled ? "TTS on" : "TTS"}
           </span>
         </button>
       </div>
@@ -293,6 +317,7 @@ function RagDebugPanel({ chunks }: { chunks: RetrievedChunk[] }) {
 export default function App() {
   const chat = useChat();
   const { theme, toggleTheme } = useTheme();
+  const tts = useTts(chat.config?.ttsModelId || undefined);
   const [modal, setModal] = useState<Modal>(null);
   const [section, setSection] = useState<SidebarSection>("conversations");
   const [ragDebugVisible, setRagDebugVisible] = useState(false);
@@ -317,6 +342,18 @@ export default function App() {
     window.addEventListener("rag-chatbot:storage-full", handler);
     return () => window.removeEventListener("rag-chatbot:storage-full", handler);
   }, []);
+
+  // Auto-speak assistant response when streaming completes.
+  // Capture the streamed text directly to avoid a React batching race where
+  // chat.messages may not yet include the new message when streamingContent clears.
+  const prevStreamingRef = useRef<string | null>(null);
+  useEffect(() => {
+    const prev = prevStreamingRef.current;
+    prevStreamingRef.current = chat.streamingContent;
+    if (prev !== null && prev.length > 0 && chat.streamingContent === null && tts.enabled) {
+      tts.speak(prev);
+    }
+  }, [chat.streamingContent, tts]);
 
   // Load bookmarks whenever the search/bookmarks panel opens
   const openSearch = useCallback(() => {
@@ -529,6 +566,10 @@ export default function App() {
           onToggleTheme={toggleTheme}
           wakeWordState={wakeWord.state}
           onToggleWakeWord={() => { wakeWord.toggle().catch((e) => setVoiceError(String(e))); }}
+          ttsEnabled={tts.enabled}
+          ttsState={tts.state}
+          ttsErrorMsg={tts.errorMsg}
+          onToggleTts={tts.toggle}
           onLoadPreset={chat.loadPreset}
           onLoadWebLlm={chat.loadWebLlmModel}
           onUnloadWebLlm={chat.unloadWebLlmModel}
@@ -630,7 +671,7 @@ export default function App() {
             voiceError={voiceError}
             onVoiceInputChange={setVoiceInput}
             onVoiceErrorDismiss={() => setVoiceError(null)}
-            onSend={chat.sendMessage}
+            onSend={(text, img) => { tts.cancel(); chat.sendMessage(text, img); }}
             onStop={chat.stopGeneration}
             onEdit={chat.editMessage}
             onBranch={chat.branchConversation}
