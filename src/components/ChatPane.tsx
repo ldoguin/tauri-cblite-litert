@@ -40,6 +40,7 @@ interface Props {
   maxTokens?: number;
   tokensGenerated?: number;
   toolExecutions?: ToolExecution[];
+  streamingAgentName?: string | null;
 }
 
 export function ChatPane({
@@ -65,6 +66,7 @@ export function ChatPane({
   maxTokens,
   tokensGenerated,
   toolExecutions = [],
+  streamingAgentName,
 }: Props) {
   const [input, setInput] = useState("");
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
@@ -201,6 +203,7 @@ export function ChatPane({
             maxTokens={maxTokens}
             tokensGenerated={tokensGenerated}
             toolExecutions={toolExecutions}
+            agentName={streamingAgentName}
           />
         )}
 

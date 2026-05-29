@@ -643,6 +643,7 @@ export default function App() {
             maxTokens={chat.config?.maxTokens}
             tokensGenerated={chat.streamingTokenCount}
             toolExecutions={chat.lastToolExecutions}
+            streamingAgentName={chat.streamingAgentName}
           />
         )}
       </main>

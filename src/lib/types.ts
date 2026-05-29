@@ -31,6 +31,15 @@ export interface Message {
    * These are never shown in the chat UI — only the parent message is displayed.
    */
   isChunk?: boolean;
+  /** Name of the agent that generated this response */
+  agentName?: string;
+  /** Tool calls and their results that occurred during generation */
+  toolExecutions?: Array<{
+    tool: string;
+    args: Record<string, unknown>;
+    result: string;
+    durationMs: number;
+  }>;
 }
 
 export interface Conversation {

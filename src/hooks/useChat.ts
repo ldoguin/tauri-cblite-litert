@@ -135,38 +135,18 @@ export function useChat() {
   // Tools
   const [enabledToolIds, setEnabledToolIds] = useState<Set<string>>(new Set());
   const [lastToolExecutions, setLastToolExecutions] = useState<ToolExecution[]>([]);
+  const [streamingAgentName, setStreamingAgentName] = useState<string | null>(null);
 
   // Agents
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [activeAgentId, setActiveAgentIdState] = useState<string | null>(ROUTER_AGENT_ID);
 
-  // Ref that always holds the latest config so setActiveAgentId can persist
-  // without reading stale closure state or calling saveConfig inside an updater.
+  // Ref that always holds the latest config so config saves are consistent.
   const configRef = useRef<ModelConfig | null>(null);
-  // Ref that always holds the latest agents list so setActiveAgentId can
-  // look up tool IDs without capturing stale closure values.
+  // Ref that always holds the latest agents list for use in callbacks.
   const agentsRef = useRef<Agent[]>([]);
   // Ref that always holds the latest conversations list so sendMessage can
   // read it synchronously without a side-effect inside a state updater.
   const conversationsRef = useRef<Conversation[]>([]);
-
-  const setActiveAgentId = useCallback((id: string | null) => {
-    setActiveAgentIdState(id);
-    // Built-in sentinels (router, agent manager) don't apply a tool set.
-    const isSentinel = id === ROUTER_AGENT_ID || id === AGENT_MANAGER_ID;
-    const agent = (!isSentinel && id) ? agentsRef.current.find((a) => a.id === id) ?? null : null;
-    setEnabledToolIds(new Set(agent?.toolIds ?? []));
-    // Build the next config eagerly so saveConfig gets the updated value.
-    // configRef.current is kept in sync by the useEffect below.
-    if (configRef.current) {
-      const next = { ...configRef.current, activeAgentId: id };
-      configRef.current = next;
-      setConfigState(next);
-      saveConfig(next).catch((e) => console.warn("[useChat] saveConfig failed:", e));
-    } else {
-      setConfigState((prev) => prev ? { ...prev, activeAgentId: id } : prev);
-    }
-  }, []);
 
   // knowledge_search is created once and kept in a ref so it isn't recreated
   // on every render. It is always available when the embedding engine is ready.
@@ -283,7 +263,7 @@ export function useChat() {
         const agentList = await listAgents();
         if (cancelled) return;
         setAgents(agentList);
-        setActiveAgentId(cfg.activeAgentId ?? ROUTER_AGENT_ID);
+        // Router is always the active responder — agents are config only.
 
         // Restore persisted web API config
         loadPersistedApiConfig();
@@ -781,6 +761,7 @@ export function useChat() {
 
     setStatus("generating");
     setLastToolExecutions([]);
+    setStreamingAgentName(null);
 
     // ── Build history for the LLM ──────────────────────────────────────────
     // historyOverride is used by editMessage to pass the already-truncated
@@ -803,17 +784,14 @@ export function useChat() {
       createdAt: new Date().toISOString(),
     };
 
-    // Resolve system instruction: active agent > conversation override > default
-    const activeAgentNow = activeAgentId === ROUTER_AGENT_ID
-      ? null
-      : (agents.find((a) => a.id === activeAgentId) ?? null);
+    // The router is always the active responder. Agents are configuration only.
     const currentConv = conversationsRef.current.find((c) => c.id === convId);
 
-    // ── System router intercept ─────────────────────────────────────────────
-    // The built-in router runs a silent LLM call to pick an agent, then uses
+    // ── Router intercept ────────────────────────────────────────────────────
+    // Always runs: picks the most appropriate agent for this message, then uses
     // that agent's system prompt + tools for the actual visible response.
-    let effectiveAgent: import("../lib/types").Agent | null = activeAgentNow;
-    if (activeAgentId === ROUTER_AGENT_ID) {
+    let effectiveAgent: import("../lib/types").Agent | null = null;
+    if (true) {
       const candidateAgents = agents.filter((a) => !a.isRouter);
       if (candidateAgents.length > 0) {
         const agentList = candidateAgents
@@ -839,13 +817,13 @@ export function useChat() {
         } catch {
           // Routing failed — fall through with no system instruction (default prompt)
         }
-        // Pre-seed accumulated so the agent label is visible as the response streams in
-        if (effectiveAgent) {
-          accumulated = `*🔀 ${effectiveAgent.name}*\n\n`;
-          setStreamingContent(accumulated);
-        } else {
-          setStreamingContent("");
-        }
+        // Show agent name as metadata badge (not injected into content)
+        setStreamingAgentName(effectiveAgent?.name ?? "Router");
+        setStreamingContent("");
+      } else {
+        // No custom agents — still badge as "Router" so the user can see it's active
+        setStreamingAgentName("Router");
+        setStreamingContent("");
       }
     }
 
@@ -854,10 +832,22 @@ export function useChat() {
       currentConv?.systemInstruction ??
       "You are a helpful assistant. Answer using the provided context when relevant.";
 
-    // When routing to a specific agent, restrict tools to that agent's toolIds.
+    // The router always has access to all tools. When routing resolves to a specific
+    // agent, restrict to that agent's toolIds; otherwise all tools are fair game.
+    const allTools = [
+      ...ALL_TOOLS,
+      ...(knowledgeSearchToolRef.current ? [knowledgeSearchToolRef.current] : []),
+      ...pdfToolsRef.current,
+      ...sourceToolsRef.current,
+      createWebSearchTool(config?.searxngUrl ?? ""),
+    ];
+
     const effectiveTools = effectiveAgent
-      ? enabledTools.filter((t) => effectiveAgent!.toolIds.includes(t.id ?? ""))
-      : enabledTools;
+      ? allTools.filter((t) => effectiveAgent!.toolIds.includes(t.id ?? ""))
+      : allTools;
+
+    // Local accumulator for tool executions — used to persist with the message.
+    const toolExecutionsAcc: Array<{ tool: string; args: Record<string, unknown>; result: string; durationMs: number }> = [];
 
     await generateStream(
       history,
@@ -888,6 +878,7 @@ export function useChat() {
           sendingRef.current = false;
           setStreamingContent(null);
 
+          if (isMountedRef.current) setStreamingAgentName(null);
           if (!isMountedRef.current) return;
           // Save whatever was accumulated — even a partial response is useful
           if (accumulated.trim()) {
@@ -897,6 +888,8 @@ export function useChat() {
               latencyMs,
               ragSourceIds,
               stopped: wasStopped || undefined,
+              agentName: effectiveAgent?.name ?? "Router",
+              toolExecutions: toolExecutionsAcc.length > 0 ? toolExecutionsAcc : undefined,
             };
             await saveMessage(assistantMsg);
             if (isMountedRef.current) {
@@ -928,6 +921,7 @@ export function useChat() {
           if (isMountedRef.current) setStatus("generating");
         },
         onToolResult: (execution) => {
+          toolExecutionsAcc.push({ tool: execution.call.tool, args: execution.call.args, result: execution.result, durationMs: execution.durationMs });
           if (isMountedRef.current) setLastToolExecutions((prev) => [...prev, execution]);
           // If view_pdf_page rendered a page, save it as an assistant message so
           // it appears inline in the chat (not just in the Tools panel).
@@ -971,7 +965,7 @@ export function useChat() {
     // so it doesn't need to be a dep — removing it prevents sendMessage from
     // being recreated on every saveConversation call.
     config, status, activeConvId, messages,
-    agents, activeAgentId,
+    agents,
     ragEnabled, enabledTools,
     createConversation, renameConversation, embedAndSave,
   ]);
@@ -1020,8 +1014,7 @@ export function useChat() {
   const removeAgent = useCallback(async (id: string) => {
     await deleteAgent(id);
     setAgents((prev) => prev.filter((a) => a.id !== id));
-    if (activeAgentId === id) setActiveAgentId(null);
-  }, [activeAgentId]);
+  }, []);
 
   // ── Full-text search across all conversations ─────────────────────────────
 
@@ -1738,17 +1731,13 @@ export function useChat() {
     if (isMountedRef.current) setKnowledgeChunks((prev) => prev.filter((c) => c.source !== source));
   }, []);
 
-  const activeAgent =
-    activeAgentId === ROUTER_AGENT_ID
-      ? { id: ROUTER_AGENT_ID, name: "Router", systemPrompt: "", description: "Routes messages to the most appropriate agent", toolIds: [], createdAt: "", updatedAt: "" } as import("../lib/types").Agent
-      : activeAgentId === AGENT_MANAGER_ID
-        ? { id: AGENT_MANAGER_ID, name: "Agent Manager", systemPrompt: "", description: "Manage agents", toolIds: [], createdAt: "", updatedAt: "" } as import("../lib/types").Agent
-        : (agents.find((a) => a.id === activeAgentId) ?? null);
+  // The router is always the active agent — agents are configuration only.
+  const activeAgent = { id: ROUTER_AGENT_ID, name: "Router", systemPrompt: "", description: "Routes messages to the most appropriate agent", toolIds: [], createdAt: "", updatedAt: "" } as import("../lib/types").Agent;
 
   return {
     status, error,
     config, conversations, activeConvId, messages, knowledgeChunks,
-    streamingContent, streamingTokensPerSec, streamingTokenCount, lastRagChunks, lastToolExecutions,
+    streamingContent, streamingAgentName, streamingTokensPerSec, streamingTokenCount, lastRagChunks, lastToolExecutions,
     ragEnabled, setRagEnabled,
     allTools: [
       ...(knowledgeSearchToolRef.current ? [knowledgeSearchToolRef.current] : []),
@@ -1759,7 +1748,7 @@ export function useChat() {
     enabledToolIds, setEnabledToolIds,
     embeddingStatus, embeddingBackend, llmBackend,
     activeLlmModelId, activeEmbedModelId,
-    agents, activeAgentId, activeAgent, setActiveAgentId,
+    agents, activeAgent,
     updateConfig,
     loadPreset,
     loadWebLlmModel, unloadWebLlmModel,

@@ -225,6 +225,26 @@ export function MessageBubble({ message, onEdit, onBranch, onBookmark, onFetchRa
             {imageLoadFailed ? "Image unavailable" : "Loading image…"}
           </div>
         )}
+        {!isUser && message.agentName && (
+          <div className="msg-agent-badge">🔀 {message.agentName}</div>
+        )}
+        {!isUser && message.toolExecutions && message.toolExecutions.length > 0 && (
+          <ul className="tool-executions">
+            {message.toolExecutions.map((ex, i) => {
+              const argSummary = Object.values(ex.args).map((v) => String(v).slice(0, 40)).join(", ");
+              const resultPreview = ex.result.slice(0, 80) + (ex.result.length > 80 ? "…" : "");
+              return (
+                <li key={i} className="tool-execution-item">
+                  <span className="tool-exec-name">🔧 {ex.tool}</span>
+                  {argSummary && <span className="tool-exec-args">({argSummary})</span>}
+                  <span className="tool-exec-arrow">→</span>
+                  <span className="tool-exec-result">{resultPreview}</span>
+                  <span className="tool-exec-ms">{ex.durationMs}ms</span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
         <div className="bubble-content">
           {editing ? (
             <div className="bubble-edit">
@@ -350,6 +370,7 @@ export function StreamingBubble({
   maxTokens,
   tokensGenerated,
   toolExecutions = [],
+  agentName,
 }: {
   content: string;
   tokensPerSec?: number;
@@ -358,6 +379,7 @@ export function StreamingBubble({
   /** Tokens generated so far */
   tokensGenerated?: number;
   toolExecutions?: ToolExecution[];
+  agentName?: string | null;
 }) {
   // Estimate seconds remaining: (maxTokens - generated) / tokensPerSec
   let etaLabel: string | null = null;
@@ -375,6 +397,7 @@ export function StreamingBubble({
     <div className="bubble-row assistant">
       <div className="bubble-avatar">🤖</div>
       <div className="bubble streaming">
+        {agentName && <div className="msg-agent-badge">🔀 {agentName}</div>}
         {toolExecutions.length > 0 && (
           <ul className="tool-executions">
             {toolExecutions.map((ex) => {

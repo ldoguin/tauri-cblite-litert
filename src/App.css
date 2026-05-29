@@ -636,6 +636,20 @@ body { background: var(--bg); height: 100dvh; overflow: hidden; }
 }
 .bubble-content pre code { background: none; padding: 0; }
 
+.msg-agent-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary, #888);
+  background: var(--surface-2, rgba(255,255,255,0.06));
+  border: 1px solid var(--border, rgba(255,255,255,0.12));
+  border-radius: 99px;
+  padding: 2px 8px;
+  margin-bottom: 6px;
+}
+
 .tool-executions {
   list-style: none;
   margin: 0 0 10px;
