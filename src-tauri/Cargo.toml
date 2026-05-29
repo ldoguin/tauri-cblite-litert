@@ -23,13 +23,19 @@ hex = "0.4"
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
-tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "135ccc2", features = ["native-cbl"] }
-tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "d2ae6e5" }
+tauri-plugin-cblite = { path = "../vendor/tauri-plugin-cblite", features = ["native-cbl"] }
+tauri-plugin-litert = { path = "../../tauri-plugin-litert" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "cookies", "gzip", "brotli", "deflate"] }
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "io-util"] }
 futures-util = "0.3"
+base64 = "0.22"
+
+[dev-dependencies]
+# Direct access to the LiteRT backends for integration tests in tests/
+litert   = "0.2"
+litertlm = "0.2"
 
 [profile.release]
 opt-level = "s"   # optimise for binary size
@@ -38,9 +44,14 @@ opt-level = "s"   # optimise for binary size
 strip = false
 lto = true
 codegen-units = 1
-panic = "abort"
 
 # Use `cargo build --profile dist` for stripped distribution artifacts.
 [profile.dist]
 inherits = "release"
 strip = true
+panic = "abort"
+
+# Override the git dep with a local copy whose build.rs supports Linux→Android.
+[patch."https://github.com/ldoguin/couchbase-lite-rust"]
+couchbase_lite = { path = "../vendor/couchbase-lite-rust" }
+

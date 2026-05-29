@@ -52,6 +52,10 @@ export interface KnowledgeChunk {
   /** Flat float32 embedding vector, stored as a JSON array */
   embedding: number[];
   createdAt: string;
+  /** CBL blob ref ("cbl-blob:<digest>:<mime>") or data URL for image chunks */
+  imageRef?: string;
+  /** 1-based PDF page number this chunk was extracted from; undefined for non-PDF sources */
+  pageNumber?: number;
 }
 
 /**
@@ -65,6 +69,10 @@ export interface Agent {
   systemPrompt: string;
   /** Optional short description shown in the list */
   description?: string;
+  /** Tool IDs enabled when this agent is active */
+  toolIds: string[];
+  /** When true, this agent routes messages to other agents instead of answering directly. */
+  isRouter?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -100,15 +108,8 @@ export interface ModelConfig {
    * Defaults to Xenova/whisper-tiny.en when empty.
    */
   whisperModelId: string;
-  /** Picovoice AccessKey for Porcupine wake word detection. */
-  porcupineAccessKey: string;
-  /**
-   * Built-in keyword name (e.g. "Jarvis", "Bumblebee") or empty to disable.
-   * Must match a BuiltInKeyword enum value exactly.
-   */
-  porcupineKeyword: string;
-  /** Detection sensitivity 0–1. Higher = more sensitive, more false positives. */
-  porcupineSensitivity: number;
+  /** Wake phrase matched against Whisper transcript (e.g. "jarvis"). Empty = disabled. */
+  wakePhrase: string;
   /** Characters per chunk when splitting documents for embedding (default 400) */
   chunkSize: number;
   /** Overlap between consecutive chunks in characters (default 80) */
@@ -118,21 +119,24 @@ export interface ModelConfig {
    * 0 = pure vector, 1 = pure BM25. Default 0.3.
    */
   hybridBm25Weight: number;
+  /**
+   * SearXNG instance URL for web search (e.g. "https://searx.be").
+   * Leave empty to use the built-in DuckDuckGo fallback.
+   */
+  searxngUrl: string;
 }
 
 export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   lmModelPath: "",
   embeddingModelPath: "",
   accelerator: "cpu",
-  maxTokens: 1024,
+  maxTokens: 4096,
   contextLength: 0,
   ragThreshold: 0.3,
   ragSourceTypes: ["knowledge", "message"] as ("knowledge" | "message")[],
   activeAgentId: null,
   whisperModelId: "",
-  porcupineAccessKey: "",
-  porcupineKeyword: "Jarvis",
-  porcupineSensitivity: 0.5,
+  wakePhrase: "jarvis",
   temperature: 0.8,
   topP: 0.95,
   topK: 40,
@@ -140,6 +144,7 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   chunkSize: 400,
   chunkOverlap: 80,
   hybridBm25Weight: 0.3,
+  searxngUrl: "",
 };
 
 export type AppStatus =

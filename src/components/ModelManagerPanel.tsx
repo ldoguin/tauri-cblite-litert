@@ -44,14 +44,17 @@ export function ModelManagerPanel({
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const isMountedRef = useRef(true);
+  const isMountedRef = useRef(false);
   // Track active download IDs so they can be cancelled when the panel unmounts,
   // preventing onProgress callbacks from firing on an unmounted component.
   const activeDownloadIdsRef = useRef<Set<string>>(new Set());
-  useEffect(() => () => {
-    isMountedRef.current = false;
-    activeDownloadIdsRef.current.forEach((id) => cancelDownload(id));
-    activeDownloadIdsRef.current.clear();
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      activeDownloadIdsRef.current.forEach((id) => cancelDownload(id));
+      activeDownloadIdsRef.current.clear();
+    };
   }, []);
 
   // Sync cache state on mount
@@ -261,8 +264,8 @@ function CustomUrlLoader({
   const [kind, setKind] = useState<"llm" | "embed">("llm");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
-  const isMountedRef = useRef(true);
-  useEffect(() => () => { isMountedRef.current = false; }, []);
+  const isMountedRef = useRef(false);
+  useEffect(() => { isMountedRef.current = true; return () => { isMountedRef.current = false; }; }, []);
 
   const handleLoad = async () => {
     const trimmed = url.trim();

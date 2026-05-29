@@ -19,6 +19,10 @@ fn main() {
 // per machine regardless of how many times the build runs.
 
 const LITERT_TAG: &str = "v0.10.2";
+// The v0.10.2 libLiteRtWebGpuAccelerator.so crashes (SIGSEGV) on AMD RDNA2/RADV
+// during model graph initialisation.  v0.10.1 fails gracefully instead, so we
+// download the accelerator from that tag.  Remove this override once v0.10.2 is fixed.
+const WEBGPU_TAG: &str = "v0.10.1";
 const GEMMA_LIB: &str = "libGemmaModelConstraintProvider.so";
 const LITERTLM_LIB: &str = "libLiteRtLmC.so";
 
@@ -103,6 +107,30 @@ fn linux_fixups() {
             .unwrap_or_else(|e| panic!("copy {GEMMA_LIB} to OUT_DIR: {e}"));
     }
 
+    // Copy WebGPU accelerator libs (from WEBGPU_TAG, not LITERT_TAG) into OUT_DIR so
+    // libLiteRtLmC.so (RUNPATH=$ORIGIN) can find them via dlopen at runtime.
+    // We pin to v0.10.1 because v0.10.2's libLiteRtWebGpuAccelerator.so crashes with
+    // SIGSEGV on AMD RDNA2/RADV; v0.10.1 fails gracefully with EngineCreationFailed.
+    let webgpu_cache = cache_root.join("litert-lm-sys-webgpu").join(WEBGPU_TAG).join(&target);
+    std::fs::create_dir_all(&webgpu_cache).expect("create webgpu cache dir");
+
+    let webgpu_libs = ["libLiteRtWebGpuAccelerator.so", "libLiteRtTopKWebGpuSampler.so"];
+    for lib in &webgpu_libs {
+        let cached = webgpu_cache.join(lib);
+        if !cached.exists() {
+            let url = format!(
+                "https://media.githubusercontent.com/media/google-ai-edge/LiteRT-LM/{}/prebuilt/{}/{}",
+                WEBGPU_TAG, upstream_dir, lib,
+            );
+            download_file(&cached, &url);
+        }
+        let dst = out_dir.join(lib);
+        if file_size(&cached) != file_size(&dst) {
+            std::fs::copy(&cached, &dst)
+                .unwrap_or_else(|e| panic!("copy {lib} to OUT_DIR: {e}"));
+        }
+    }
+
     // Copy libLiteRtLmC.so into OUT_DIR and patch its RUNPATH to $ORIGIN.
     let litertlm_out = out_dir.join(LITERTLM_LIB);
     let needs_copy = !litertlm_out.exists()
@@ -172,7 +200,7 @@ fn patch_runpath(so: &std::path::Path) {
             return;
         }
         Err(e) => panic!("patchelf --print-rpath: {e}"),
-        Ok(out) if out.stdout.starts_with(b"$ORIGIN") => return,
+        Ok(out) if out.stdout.trim_ascii_end() == b"$ORIGIN" => return,
         Ok(_) => {}
     }
     let st = std::process::Command::new("patchelf")

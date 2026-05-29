@@ -26,6 +26,7 @@ const COL_MESSAGES      = "_default.messages";
 const COL_KNOWLEDGE     = "_default.knowledge";
 const COL_CONFIG        = "_default.config";
 const COL_AGENTS        = "_default.agents";
+const COL_PDFS          = "_default.pdfs";
 
 // ── Blob storage ───────────────────────────────────────────────────────────
 //
@@ -142,9 +143,15 @@ export async function initDatabase(dbDir: string): Promise<void> {
     await runMigrations();
     return;
   }
-  const { openDatabase } = await import("tauri-plugin-cblite");
+  const { openDatabase, createFtsIndex } = await import("tauri-plugin-cblite");
   await openDatabase(dbDir, "rag-chatbot", undefined, [
-    COL_CONVERSATIONS, COL_MESSAGES, COL_KNOWLEDGE, COL_CONFIG, COL_AGENTS,
+    COL_CONVERSATIONS, COL_MESSAGES, COL_KNOWLEDGE, COL_CONFIG, COL_AGENTS, COL_PDFS,
+  ]);
+  // Create FTS indexes for full-text search via N1QL MATCH().
+  // Idempotent — safe to call on every startup.
+  await Promise.all([
+    createFtsIndex(COL_KNOWLEDGE, "knowledgeFts", "text"),
+    createFtsIndex(COL_MESSAGES,  "messagesFts",  "content"),
   ]);
   await runMigrations();
 }
@@ -162,6 +169,26 @@ export async function loadConfig(): Promise<ModelConfig> {
     const doc = webStore.get(COL_CONFIG, "app-config");
     return doc ? { ...DEFAULT_MODEL_CONFIG, ...(doc as Partial<ModelConfig>) } : { ...DEFAULT_MODEL_CONFIG };
   }
+
+  // On Android, config.json import is handled automatically by the Kotlin openDatabase
+  // hook (importConfigIfPresent), which writes the result into CBL before this runs.
+  // On desktop, call the Rust command to handle the same for app_data_dir.
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    const { platform } = await import("@tauri-apps/plugin-os");
+    if ((await platform()) !== "android") {
+      const raw = await invoke<string | null>("read_config_import");
+      if (raw) {
+        const imported = JSON.parse(raw) as Partial<ModelConfig>;
+        const merged = { ...DEFAULT_MODEL_CONFIG, ...imported };
+        await saveConfig(merged);
+        return merged;
+      }
+    }
+  } catch {
+    // ignore
+  }
+
   const { getDocument } = await import("tauri-plugin-cblite");
   const doc = await getDocument(COL_CONFIG, "app-config")
     .catch((e: unknown) => {
@@ -187,7 +214,7 @@ export async function saveConfig(config: ModelConfig): Promise<void> {
 export async function listConversations(limit = 200, offset = 0): Promise<Conversation[]> {
   if (!isTauri()) {
     return (webStore.list(COL_CONVERSATIONS) as unknown as Conversation[])
-      .filter((c) => !(c as unknown as Record<string, unknown>)["_deleted"])
+      .filter((c) => !(c as unknown as Record<string, unknown>)["__deleted"])
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .slice(offset, offset + limit);
   }
@@ -196,10 +223,10 @@ export async function listConversations(limit = 200, offset = 0): Promise<Conver
     "N1QL",
     `SELECT META().id AS id, title, createdAt, updatedAt, systemInstruction
      FROM \`_default\`.conversations
-     WHERE (_deleted IS MISSING OR _deleted = false)
+     WHERE __deleted IS MISSING
      ORDER BY updatedAt DESC
-     LIMIT $limit OFFSET $offset`,
-    { limit, offset },
+     LIMIT ${limit} OFFSET ${offset}`,
+    {},
   );
   return rows as Conversation[];
 }
@@ -240,15 +267,14 @@ export async function deleteConversation(id: string): Promise<void> {
   // Soft-delete matches the conversation document pattern and ensures
   // deletions replicate correctly as tombstones if sync is ever enabled.
   const { executeQuery, saveDocument } = await import("tauri-plugin-cblite");
-  // Fetch message IDs first, then soft-delete each one so CouchbaseLite
-  // creates proper tombstone documents for sync replication.
+  // Fetch message IDs first, then tombstone each one.
   const rows = await executeQuery(
     "N1QL",
     `SELECT META().id AS id FROM \`_default\`.messages WHERE conversationId = $cid`,
     { cid: id },
   ) as Array<{ id: string }>;
-  await Promise.all(rows.map((r) => saveDocument(COL_MESSAGES, r.id, { _deleted: true })));
-  await saveDocument(COL_CONVERSATIONS, id, { _deleted: true });
+  await Promise.all(rows.map((r) => saveDocument(COL_MESSAGES, r.id, { __deleted: true })));
+  await saveDocument(COL_CONVERSATIONS, id, { __deleted: true });
 }
 
 // ── Messages ───────────────────────────────────────────────────────────────
@@ -266,13 +292,12 @@ export async function listMessages(conversationId: string, limit = 10_000, offse
   const { executeQuery } = await import("tauri-plugin-cblite");
   const rows = await executeQuery(
     "N1QL",
-    `SELECT META().id AS id, conversationId, role, content, createdAt, latencyMs,
-            ragSourceIds, embedding, bookmarked, stopped, imageDataUrl, chunkIds, isChunk
+    `SELECT META().id AS id, conversationId, role, content, createdAt, latencyMs, ragSourceIds, bookmarked, stopped, imageDataUrl, chunkIds, isChunk
      FROM \`_default\`.messages
-     WHERE conversationId = $cid AND (isChunk IS MISSING OR isChunk = false)
+     WHERE conversationId = $cid AND (isChunk IS MISSING OR isChunk = false) AND __deleted IS MISSING
      ORDER BY createdAt ASC
-     LIMIT $limit OFFSET $offset`,
-    { cid: conversationId, limit, offset },
+     LIMIT ${limit} OFFSET ${offset}`,
+    { cid: conversationId },
   );
   return rows as Message[];
 }
@@ -300,8 +325,8 @@ export async function listBookmarkedMessages(limit = 500): Promise<Message[]> {
      FROM \`_default\`.messages
      WHERE bookmarked = true AND (isChunk IS MISSING OR isChunk = false)
      ORDER BY createdAt DESC
-     LIMIT $limit`,
-    { limit },
+     LIMIT ${limit}`,
+    {},
   );
   return rows as Message[];
 }
@@ -326,10 +351,10 @@ export async function deleteMessage(id: string): Promise<void> {
     }) as { chunkIds?: string[] } | null;
   if (parent?.chunkIds?.length) {
     await Promise.all(
-      parent.chunkIds.map((cid) => saveDocument(COL_MESSAGES, cid, { _deleted: true })),
+      parent.chunkIds.map((cid) => saveDocument(COL_MESSAGES, cid, { __deleted: true })),
     );
   }
-  await saveDocument(COL_MESSAGES, id, { _deleted: true });
+  await saveDocument(COL_MESSAGES, id, { __deleted: true });
 }
 
 // ── Knowledge base ─────────────────────────────────────────────────────────
@@ -345,17 +370,53 @@ export async function saveKnowledgeChunk(chunk: KnowledgeChunk): Promise<void> {
 export async function listKnowledgeChunks(limit = 2000, offset = 0): Promise<KnowledgeChunk[]> {
   if (!isTauri()) {
     return (webStore.list(COL_KNOWLEDGE) as unknown as KnowledgeChunk[])
+      .filter((c) => !(c as unknown as Record<string, unknown>)["__deleted"])
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
       .slice(offset, offset + limit);
   }
   const { executeQuery } = await import("tauri-plugin-cblite");
   const rows = await executeQuery(
     "N1QL",
-    `SELECT META().id AS id, source, text, embedding, createdAt
+    `SELECT META().id AS id, source, text, embedding, createdAt, imageRef, pageNumber
      FROM \`_default\`.knowledge
+     WHERE __deleted IS MISSING
      ORDER BY createdAt DESC
-     LIMIT $limit OFFSET $offset`,
-    { limit, offset },
+     LIMIT ${limit} OFFSET ${offset}`,
+    {},
+  );
+  return rows as KnowledgeChunk[];
+}
+
+/**
+ * Full-text search over knowledge chunks using the CBL FTS index (Tauri) or
+ * an in-memory case-insensitive substring filter (web).
+ *
+ * Requires the `knowledgeFts` index to exist on the `knowledge` collection,
+ * which is created by `initDatabase` via `createFtsIndex` after `openDatabase`.
+ */
+export async function searchKnowledgeText(
+  query: string,
+  limit = 20,
+): Promise<KnowledgeChunk[]> {
+  if (!isTauri()) {
+    const q = query.toLowerCase();
+    return (webStore.list(COL_KNOWLEDGE) as unknown as KnowledgeChunk[])
+      .filter(
+        (c) =>
+          !(c as unknown as Record<string, unknown>)["__deleted"] &&
+          c.text.toLowerCase().includes(q),
+      )
+      .slice(0, limit);
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, source, text, createdAt, imageRef, pageNumber
+     FROM \`_default\`.knowledge
+     WHERE MATCH(knowledgeFts, $query) AND __deleted IS MISSING
+     ORDER BY RANK() DESC
+     LIMIT ${limit}`,
+    { query },
   );
   return rows as KnowledgeChunk[];
 }
@@ -382,8 +443,8 @@ export async function listEmbeddedMessages(limit = 50_000): Promise<Message[]> {
      FROM \`_default\`.messages
      WHERE embedding IS NOT MISSING AND (isChunk IS MISSING OR isChunk = false)
      ORDER BY createdAt DESC
-     LIMIT $limit`,
-    { limit },
+     LIMIT ${limit}`,
+    {},
   );
   return rows as Message[];
 }
@@ -404,7 +465,7 @@ export async function getKnowledgeChunksByIds(ids: string[]): Promise<KnowledgeC
   const params = Object.fromEntries(ids.map((id, i) => [`id${i}`, id]));
   const rows = await executeQuery(
     "N1QL",
-    `SELECT META().id AS id, source, text, createdAt FROM \`_default\`.knowledge WHERE META().id IN [${placeholders}]`,
+    `SELECT META().id AS id, source, text, createdAt, imageRef, pageNumber FROM \`_default\`.knowledge WHERE META().id IN [${placeholders}]`,
     params,
   );
   return rows as KnowledgeChunk[];
@@ -439,7 +500,11 @@ export async function deleteKnowledgeChunk(id: string): Promise<void> {
   bumpRagPoolVersion();
   if (!isTauri()) { webStore.delete(COL_KNOWLEDGE, id); return; }
   const { saveDocument } = await import("tauri-plugin-cblite");
-  await saveDocument(COL_KNOWLEDGE, id, { _deleted: true });
+  // Use a non-CBL-reserved tombstone field so CBL 4.x accepts the document.
+  // `listKnowledgeChunks` filters these out via `WHERE __deleted IS MISSING`.
+  // On APK rebuild, the Kotlin/Rust plugin will intercept `__deleted: true`
+  // and call `purge()` to permanently remove the document.
+  await saveDocument(COL_KNOWLEDGE, id, { __deleted: true });
 }
 
 /** Delete all chunks whose source label matches exactly. */
@@ -452,30 +517,35 @@ export async function deleteKnowledgeBySource(source: string): Promise<void> {
     }
     return;
   }
-  // Single N1QL DELETE — handles any number of chunks regardless of the
-  // listKnowledgeChunks() pagination limit.
-  const { executeQuery } = await import("tauri-plugin-cblite");
-  await executeQuery(
+  // CBL N1QL is read-only — DELETE statements are not supported.
+  // Fetch matching IDs first, then purge each document individually.
+  const { executeQuery, saveDocument } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
     "N1QL",
-    `DELETE FROM \`_default\`.knowledge WHERE source = $source`,
+    `SELECT META().id AS id FROM \`_default\`.knowledge WHERE source = $source`,
     { source },
-  );
+  ) as Array<{ id: string }>;
+  await Promise.all(rows.map((r) => saveDocument(COL_KNOWLEDGE, r.id, { __deleted: true })));
 }
 
 // ── Agents ─────────────────────────────────────────────────────────────────
 
 export async function listAgents(): Promise<Agent[]> {
   if (!isTauri()) {
-    return (webStore.list(COL_AGENTS) as unknown as Agent[])
+    return (webStore.list(COL_AGENTS) as unknown as Array<Agent & { toolIds?: string[] }>)
+      .map((a) => ({ ...a, toolIds: a.toolIds ?? [] }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
   const { executeQuery } = await import("tauri-plugin-cblite");
   const rows = await executeQuery(
     "N1QL",
-    `SELECT META().id AS id, name, systemPrompt, description, createdAt, updatedAt
+    `SELECT META().id AS id, name, systemPrompt, description, toolIds, createdAt, updatedAt
      FROM \`_default\`.agents ORDER BY name ASC`,
   );
-  return rows as Agent[];
+  return (rows as Array<Record<string, unknown>>).map((row) => ({
+    ...(row as unknown as Agent),
+    toolIds: (row.toolIds as string[] | undefined) ?? [],
+  }));
 }
 
 export async function saveAgent(agent: Agent): Promise<void> {
@@ -488,7 +558,56 @@ export async function saveAgent(agent: Agent): Promise<void> {
 export async function deleteAgent(id: string): Promise<void> {
   if (!isTauri()) { webStore.delete(COL_AGENTS, id); return; }
   const { saveDocument } = await import("tauri-plugin-cblite");
-  await saveDocument(COL_AGENTS, id, { _deleted: true });
+  await saveDocument(COL_AGENTS, id, { __deleted: true });
+}
+
+// ── PDF records ────────────────────────────────────────────────────────────
+//
+// Maps PDF filenames to their on-disk paths. The actual bytes live at
+// {app_local_data_dir}/pdfs/<filename> (written by the `save_pdf` Rust command).
+// CBL stores the filename → path mapping so PDF tools can locate files by name.
+
+export interface PdfRecord {
+  filename: string;
+  path: string;
+  createdAt: string;
+}
+
+export async function savePdfRecord(filename: string, filePath: string): Promise<void> {
+  const doc = { filename, path: filePath, createdAt: new Date().toISOString() };
+  if (!isTauri()) {
+    webStore.set(COL_PDFS, filename, doc);
+    return;
+  }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_PDFS, filename, doc);
+}
+
+export async function getPdfPath(filename: string): Promise<string | null> {
+  if (!isTauri()) {
+    const doc = webStore.get(COL_PDFS, filename);
+    return typeof doc?.path === "string" ? doc.path : null;
+  }
+  const { getDocument } = await import("tauri-plugin-cblite");
+  const doc = await getDocument(COL_PDFS, filename)
+    .catch((e: unknown) => {
+      if (String(e).toLowerCase().includes("not found")) return null;
+      throw e;
+    }) as { path?: string } | null;
+  return doc?.path ?? null;
+}
+
+export async function listPdfRecords(): Promise<PdfRecord[]> {
+  if (!isTauri()) {
+    return webStore.list(COL_PDFS) as unknown as PdfRecord[];
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, filename, path, createdAt FROM \`_default\`.pdfs WHERE __deleted IS MISSING ORDER BY createdAt DESC`,
+    {},
+  );
+  return rows as PdfRecord[];
 }
 
 // ── Web store (localStorage-backed) ───────────────────────────────────────

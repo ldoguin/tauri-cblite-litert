@@ -67,6 +67,8 @@ export interface LoadLmModelOptions {
   accelerator?: Accelerator;
   maxTokens?: number;
   cacheDir?: string;
+  /** Enable vision (multimodal) backend for models like Gemma 4 E2B/E4B. */
+  vision?: boolean;
 }
 
 export interface LmModelInfo {

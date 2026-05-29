@@ -7,6 +7,7 @@ interface Props {
   onIngest: (source: string, text: string) => Promise<void>;
   onIngestPdf: (file: File) => Promise<void>;
   onIngestUrl: (url: string) => Promise<void>;
+  onIngestImage: (file: File) => Promise<void>;
   onDelete: (id: string) => void;
   onDeleteBySource: (source: string) => void;
   onReEmbedAll: () => void;
@@ -14,13 +15,17 @@ interface Props {
   reEmbedProgress: { done: number; total: number } | null;
   ingestProgress: { done: number; total: number; source: string } | null;
   onClose: () => void;
+  embedded?: boolean;
+  filterSource?: string | null;
+  onClearFilter?: () => void;
 }
 
 type IngestTab = "text" | "file" | "url";
 
 export function KnowledgePanel({
-  chunks, status, onIngest, onIngestPdf, onIngestUrl, onDelete, onDeleteBySource,
-  onReEmbedAll, onCancelReEmbed, reEmbedProgress, ingestProgress, onClose,
+  chunks, status, onIngest, onIngestPdf, onIngestUrl, onIngestImage, onDelete, onDeleteBySource,
+  onReEmbedAll, onCancelReEmbed, reEmbedProgress, ingestProgress, onClose, embedded,
+  filterSource, onClearFilter,
 }: Props) {
   const [tab, setTab] = useState<IngestTab>("file");
   const [pasteText, setPasteText] = useState("");
@@ -47,13 +52,14 @@ export function KnowledgePanel({
     return map;
   }, [chunks]);
 
-  // Filter by search
+  // Filter by search and/or selected source
   const filteredSources = useMemo(() => {
     const q = search.toLowerCase();
-    return Array.from(grouped.entries()).filter(([source, cs]) =>
-      !q || source.toLowerCase().includes(q) || cs.some((c) => c.text.toLowerCase().includes(q))
-    );
-  }, [grouped, search]);
+    return Array.from(grouped.entries()).filter(([source, cs]) => {
+      if (filterSource && source !== filterSource) return false;
+      return !q || source.toLowerCase().includes(q) || cs.some((c) => c.text.toLowerCase().includes(q));
+    });
+  }, [grouped, search, filterSource]);
 
   const withError = async (fn: () => Promise<void>) => {
     if (isMountedRef.current) { setIngesting(true); setIngestError(null); }
@@ -84,6 +90,8 @@ export function KnowledgePanel({
       try {
         if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
           await onIngestPdf(file);
+        } else if (file.type.startsWith("image/")) {
+          await onIngestImage(file);
         } else {
           const text = await file.text();
           await onIngest(file.name, text);
@@ -105,45 +113,52 @@ export function KnowledgePanel({
     handleFiles(e.dataTransfer.files).catch((err) => setIngestError(String(err)));
   };
 
-  return (
-    <div className="panel-overlay" onClick={onClose}>
-      <div className="panel panel-wide" onClick={(e) => e.stopPropagation()}>
-        <div className="panel-header">
-          <h2>📚 Knowledge Base</h2>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-            {ingestProgress && (
-              <span className="re-embed-progress" aria-live="polite">
-                Embedding "{ingestProgress.source}" — {ingestProgress.done}/{ingestProgress.total} chunks…
-              </span>
-            )}
-            {reEmbedProgress ? (
-              <span className="re-embed-progress" style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                Re-embedding {reEmbedProgress.done}/{reEmbedProgress.total}…
-                <button
-                  className="btn-sm secondary"
-                  onClick={onCancelReEmbed}
-                  title="Cancel re-embedding"
-                >
-                  ✕ Cancel
-                </button>
-              </span>
-            ) : (
+  const inner = (
+    <div className={embedded ? "panel panel-wide embedded-panel" : "panel panel-wide"} onClick={(e) => e.stopPropagation()}>
+      <div className="panel-header">
+        <h2>📚 Knowledge Base</h2>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          {ingestProgress && (
+            <span className="re-embed-progress" aria-live="polite">
+              Embedding "{ingestProgress.source}" — {ingestProgress.done}/{ingestProgress.total} chunks…
+            </span>
+          )}
+          {reEmbedProgress ? (
+            <span className="re-embed-progress" style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              Re-embedding {reEmbedProgress.done}/{reEmbedProgress.total}…
               <button
                 className="btn-sm secondary"
-                onClick={onReEmbedAll}
-                disabled={chunks.length === 0 || status === "embedding"}
-                title="Re-compute all embeddings with the current model"
+                onClick={onCancelReEmbed}
+                title="Cancel re-embedding"
               >
-                ↺ Re-embed all
+                ✕ Cancel
               </button>
-            )}
-            <button className="icon-btn" onClick={onClose}>✕</button>
-          </div>
+            </span>
+          ) : (
+            <button
+              className="btn-sm secondary"
+              onClick={onReEmbedAll}
+              disabled={chunks.length === 0 || status === "embedding"}
+              title="Re-compute all embeddings with the current model"
+            >
+              ↺ Re-embed all
+            </button>
+          )}
+          {!embedded && <button className="icon-btn" onClick={onClose}>✕</button>}
         </div>
+      </div>
 
         <div className="panel-body">
+          {/* ── Filter breadcrumb ── */}
+          {filterSource && (
+            <div className="kb-filter-bar">
+              <button className="kb-filter-back" onClick={onClearFilter}>← All sources</button>
+              <span className="kb-filter-source" title={filterSource}>{filterSource}</span>
+            </div>
+          )}
+
           {/* ── Ingest section ── */}
-          <section className="panel-section">
+          {!filterSource && <section className="panel-section">
             <h3>Add documents</h3>
             <p className="hint">
               Text is split into chunks, embedded, and stored in CouchbaseLite for offline retrieval.
@@ -175,11 +190,11 @@ export function KnowledgePanel({
                 <span className="drop-zone-label">
                   {isEmbedding ? "Embedding…" : "Drop files here or click to browse"}
                 </span>
-                <span className="drop-zone-hint">.txt · .md · .csv · .pdf</span>
+                <span className="drop-zone-hint">.txt · .md · .csv · .pdf · .jpg · .png · .webp</span>
                 <input
                   ref={fileRef}
                   type="file"
-                  accept=".txt,.md,.csv,.pdf"
+                  accept=".txt,.md,.csv,.pdf,.jpg,.jpeg,.png,.webp,image/*"
                   multiple
                   style={{ display: "none" }}
                   onChange={(e) => { handleFiles(e.target.files).catch((err) => setIngestError(String(err))); }}
@@ -240,7 +255,7 @@ export function KnowledgePanel({
             )}
 
             {ingestError && <p className="error-text" style={{ marginTop: 8 }}>{ingestError}</p>}
-          </section>
+          </section>}
 
           {/* ── Chunk list ── */}
           <section className="panel-section">
@@ -260,13 +275,15 @@ export function KnowledgePanel({
             </div>
 
             {filteredSources.length === 0 ? (
-              <p className="hint">{search ? "No matches." : "No chunks yet. Add a document above."}</p>
+              <p className="hint">{search ? "No matches." : filterSource ? "No chunks for this source." : "No chunks yet. Add a document above."}</p>
             ) : (
               <ul className="source-list">
                 {filteredSources.map(([source, sourceChunks]) => (
                   <li key={source} className="source-item">
                     <div className="source-header">
-                      <span className="source-name" title={source}>{source}</span>
+                      <span className="source-name" title={source}>
+                        {sourceChunks.some((c) => c.imageRef) ? "🖼️ " : ""}{source}
+                      </span>
                       <span className="source-count">{sourceChunks.length} chunk{sourceChunks.length !== 1 ? "s" : ""}</span>
                       {deleteConfirmSource === source ? (
                         <div className="source-delete-confirm">
@@ -300,6 +317,7 @@ export function KnowledgePanel({
           </section>
         </div>
       </div>
-    </div>
   );
+  if (embedded) return inner;
+  return <div className="panel-overlay" onClick={onClose}>{inner}</div>;
 }

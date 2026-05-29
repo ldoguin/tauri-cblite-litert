@@ -37,7 +37,7 @@ import {
   saveAgent,
   deleteAgent,
 } from "../lib/db";
-import { extractPdfText } from "../lib/pdf";
+import { extractPdfContent, extractPdfPages, renderPdfPage } from "../lib/pdf";
 import { MODEL_CATALOGUE } from "../lib/modelCache";
 import { fetchUrlText } from "../lib/urlIngest";
 import {
@@ -56,6 +56,7 @@ import {
   loadModels,
   unloadModels,
   generateStream,
+  generateOnce,
   loadWebLlm,
   unloadWebLlm,
   getActiveBackend,
@@ -80,9 +81,20 @@ import {
   ALL_TOOLS,
   getToolById,
   createKnowledgeSearchTool,
+  createWebSearchTool,
+  createPdfTools,
+  createSourceTools,
   type Tool,
   type ToolExecution,
 } from "../lib/tools";
+import { extractPdfPageText } from "../lib/pdf";
+import { savePdfRecord, getPdfPath } from "../lib/db";
+
+/** Sentinel ID for the built-in system router agent. Never stored in CBL. */
+export const ROUTER_AGENT_ID = "__router__";
+
+/** Sentinel ID for the built-in agent manager UI. Never stored in CBL. */
+export const AGENT_MANAGER_ID = "__agent_manager__";
 
 async function resolveDbDir(): Promise<string> {
   if (!isTauri()) return "/tmp/rag-chatbot";
@@ -126,17 +138,24 @@ export function useChat() {
 
   // Agents
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [activeAgentId, setActiveAgentIdState] = useState<string | null>(null);
+  const [activeAgentId, setActiveAgentIdState] = useState<string | null>(ROUTER_AGENT_ID);
 
   // Ref that always holds the latest config so setActiveAgentId can persist
   // without reading stale closure state or calling saveConfig inside an updater.
   const configRef = useRef<ModelConfig | null>(null);
+  // Ref that always holds the latest agents list so setActiveAgentId can
+  // look up tool IDs without capturing stale closure values.
+  const agentsRef = useRef<Agent[]>([]);
   // Ref that always holds the latest conversations list so sendMessage can
   // read it synchronously without a side-effect inside a state updater.
   const conversationsRef = useRef<Conversation[]>([]);
 
   const setActiveAgentId = useCallback((id: string | null) => {
     setActiveAgentIdState(id);
+    // Built-in sentinels (router, agent manager) don't apply a tool set.
+    const isSentinel = id === ROUTER_AGENT_ID || id === AGENT_MANAGER_ID;
+    const agent = (!isSentinel && id) ? agentsRef.current.find((a) => a.id === id) ?? null : null;
+    setEnabledToolIds(new Set(agent?.toolIds ?? []));
     // Build the next config eagerly so saveConfig gets the updated value.
     // configRef.current is kept in sync by the useEffect below.
     if (configRef.current) {
@@ -160,17 +179,63 @@ export function useChat() {
     });
   }
 
+  // PDF tools are created once; they close over a live getter for knowledgeChunks
+  // so the list stays current without recreating the tool objects.
+  const knowledgeChunksRef = useRef<typeof knowledgeChunks>(knowledgeChunks);
+  knowledgeChunksRef.current = knowledgeChunks;
+  const pdfToolsRef = useRef<Tool[]>([]);
+  if (pdfToolsRef.current.length === 0) {
+    pdfToolsRef.current = createPdfTools({
+      getChunks: () => knowledgeChunksRef.current,
+      getPdfPath,
+      readPdfBytes: async (path: string) => {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const b64 = await invoke<string>("read_pdf_bytes", { path });
+        const raw = atob(b64);
+        const bytes = new Uint8Array(raw.length);
+        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+        return bytes.buffer;
+      },
+      renderPdfPage: async (buffer: ArrayBuffer, page: number) => renderPdfPage(buffer, page),
+      extractPdfPageText,
+    });
+  }
+
+  // Source tools: list_knowledge_sources + read_source_chunks
+  const sourceToolsRef = useRef<Tool[]>([]);
+  if (sourceToolsRef.current.length === 0) {
+    sourceToolsRef.current = createSourceTools({
+      getChunks: () => knowledgeChunksRef.current,
+    });
+  }
+
   // Memoize so sendMessage (and its useCallback deps) aren't recreated on
   // every render — enabledToolIds is a Set so we stringify it as the key.
   const enabledToolIdsKey = Array.from(enabledToolIds).sort().join(",");
+  const searxngUrl = config?.searxngUrl ?? "";
+  const PDF_TOOL_IDS    = new Set(["list_knowledge_pdfs", "get_pdf_page", "view_pdf_page"]);
+  const SOURCE_TOOL_IDS = new Set(["list_knowledge_sources", "read_source_chunks", "search_knowledge_text"]);
   const enabledTools = useMemo(() => [
-    // Always include knowledge_search so the LLM can explicitly query the KB
-    knowledgeSearchToolRef.current as Tool,
-    ...Array.from(enabledToolIds)
-      .map((id) => getToolById(id))
-      .filter((t): t is Tool => t !== undefined),
+    ...Array.from(enabledToolIds).flatMap((id) => {
+      if (id === "knowledge_search") {
+        return knowledgeSearchToolRef.current ? [knowledgeSearchToolRef.current] : [];
+      }
+      if (id === "web_search") {
+        return [createWebSearchTool(searxngUrl)];
+      }
+      if (PDF_TOOL_IDS.has(id)) {
+        const t = pdfToolsRef.current.find((pt) => pt.id === id);
+        return t ? [t] : [];
+      }
+      if (SOURCE_TOOL_IDS.has(id)) {
+        const t = sourceToolsRef.current.find((st) => st.id === id);
+        return t ? [t] : [];
+      }
+      const t = getToolById(id);
+      return t ? [t] : [];
+    }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [enabledToolIdsKey]);
+  ], [enabledToolIdsKey, searxngUrl]);
 
   const modelsLoaded = useRef(false);
   // Ref-based guard for sendMessage — prevents concurrent sends even when
@@ -186,6 +251,7 @@ export function useChat() {
   useEffect(() => { configRef.current = config; }, [config]);
   useEffect(() => { conversationsRef.current = conversations; }, [conversations]);
   useEffect(() => { activeConvIdRef.current = activeConvId; }, [activeConvId]);
+  useEffect(() => { agentsRef.current = agents; }, [agents]);
 
   // ── Initialisation ───────────────────────────────────────────────────────
 
@@ -217,7 +283,7 @@ export function useChat() {
         const agentList = await listAgents();
         if (cancelled) return;
         setAgents(agentList);
-        if (cfg.activeAgentId) setActiveAgentId(cfg.activeAgentId);
+        setActiveAgentId(cfg.activeAgentId ?? ROUTER_AGENT_ID);
 
         // Restore persisted web API config
         loadPersistedApiConfig();
@@ -727,7 +793,8 @@ export function useChat() {
     let accumulated = "";
     assistantId = uuidv4();
 
-    // Add placeholder so the streaming bubble has an ID to update
+    // Build the final-message template (NOT added to messages yet —
+    // StreamingBubble owns the display during streaming via streamingContent).
     const placeholderMsg: Message = {
       id: assistantId,
       conversationId: convId,
@@ -735,15 +802,62 @@ export function useChat() {
       content: "",
       createdAt: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, placeholderMsg]);
 
     // Resolve system instruction: active agent > conversation override > default
-    const activeAgentNow = agents.find((a) => a.id === activeAgentId) ?? null;
+    const activeAgentNow = activeAgentId === ROUTER_AGENT_ID
+      ? null
+      : (agents.find((a) => a.id === activeAgentId) ?? null);
     const currentConv = conversationsRef.current.find((c) => c.id === convId);
+
+    // ── System router intercept ─────────────────────────────────────────────
+    // The built-in router runs a silent LLM call to pick an agent, then uses
+    // that agent's system prompt + tools for the actual visible response.
+    let effectiveAgent: import("../lib/types").Agent | null = activeAgentNow;
+    if (activeAgentId === ROUTER_AGENT_ID) {
+      const candidateAgents = agents.filter((a) => !a.isRouter);
+      if (candidateAgents.length > 0) {
+        const agentList = candidateAgents
+          .map((a) => `- ${a.name}${a.description ? `: ${a.description}` : ""}`)
+          .join("\n");
+        const routerSystem =
+          "You are a routing assistant. Read the user's message and select the most appropriate agent.\n" +
+          'Reply ONLY with valid JSON on a single line. Example: {"agent": "coding-assistant"}\n\n' +
+          "Available agents:\n" + agentList +
+          '\n\nRespond ONLY with: {"agent": "<agent-name>"}';
+        setStreamingContent("🔀 Routing…");
+        try {
+          const raw = await generateOnce(text, routerSystem, config, abortController.signal);
+          // Accept both "agent" and "route" as the JSON key for robustness.
+          // Normalise both sides: lowercase, collapse underscores/hyphens to spaces.
+          const m = raw.match(/\{\s*"(?:agent|route)"\s*:\s*"([^"]+)"\s*\}/);
+          if (m) {
+            const norm = (s: string) => s.toLowerCase().replace(/[_-]/g, " ").replace(/\s+/g, " ").trim();
+            const targetName = norm(m[1]);
+            const target = candidateAgents.find((a) => norm(a.name) === targetName);
+            if (target) effectiveAgent = target;
+          }
+        } catch {
+          // Routing failed — fall through with no system instruction (default prompt)
+        }
+        // Pre-seed accumulated so the agent label is visible as the response streams in
+        if (effectiveAgent) {
+          accumulated = `*🔀 ${effectiveAgent.name}*\n\n`;
+          setStreamingContent(accumulated);
+        } else {
+          setStreamingContent("");
+        }
+      }
+    }
+
     const systemInstruction =
-      activeAgentNow?.systemPrompt ??
+      effectiveAgent?.systemPrompt ??
       currentConv?.systemInstruction ??
       "You are a helpful assistant. Answer using the provided context when relevant.";
+
+    // When routing to a specific agent, restrict tools to that agent's toolIds.
+    const effectiveTools = effectiveAgent
+      ? enabledTools.filter((t) => effectiveAgent!.toolIds.includes(t.id ?? ""))
+      : enabledTools;
 
     await generateStream(
       history,
@@ -752,7 +866,7 @@ export function useChat() {
         modelId: config.lmModelPath ? "rag-lm" : undefined,
         systemInstruction,
         config,
-        enabledTools,
+        enabledTools: effectiveTools,
         signal: abortController.signal,
         imageDataUrl,
       },
@@ -767,9 +881,6 @@ export function useChat() {
             setStreamingTokensPerSec(streamTokenCountRef.current / elapsed);
           }
           setStreamingContent(accumulated);
-          setMessages((prev) =>
-            prev.map((m) => m.id === assistantId ? { ...m, content: accumulated } : m),
-          );
         },
         onDone: async (latencyMs: number) => {
           const wasStopped = abortController.signal.aborted;
@@ -789,9 +900,7 @@ export function useChat() {
             };
             await saveMessage(assistantMsg);
             if (isMountedRef.current) {
-              setMessages((prev) =>
-                prev.map((m) => m.id === assistantId ? assistantMsg : m),
-              );
+              setMessages((prev) => [...prev, assistantMsg]);
             }
             // Only embed and notify on a complete (non-stopped) response
             if (!wasStopped) {
@@ -820,6 +929,21 @@ export function useChat() {
         },
         onToolResult: (execution) => {
           if (isMountedRef.current) setLastToolExecutions((prev) => [...prev, execution]);
+          // If view_pdf_page rendered a page, save it as an assistant message so
+          // it appears inline in the chat (not just in the Tools panel).
+          if (execution.imageDataUrl && activeConvIdRef.current) {
+            const convId = activeConvIdRef.current;
+            const imgMsg: Message = {
+              id: uuidv4(),
+              conversationId: convId,
+              role: "assistant",
+              content: execution.result,
+              imageDataUrl: execution.imageDataUrl,
+              createdAt: new Date().toISOString(),
+            };
+            saveMessage(imgMsg).catch((e) => console.warn("[onToolResult] Failed to save image message:", e));
+            if (isMountedRef.current) setMessages((prev) => [...prev, imgMsg]);
+          }
         },
         onError: (err) => {
           sendingRef.current = false;
@@ -858,6 +982,8 @@ export function useChat() {
     name: string,
     systemPrompt: string,
     description?: string,
+    toolIds: string[] = [],
+    isRouter?: boolean,
   ): Promise<Agent> => {
     const now = new Date().toISOString();
     const agent: Agent = {
@@ -865,6 +991,8 @@ export function useChat() {
       name,
       systemPrompt,
       description,
+      toolIds,
+      ...(isRouter ? { isRouter: true } : {}),
       createdAt: now,
       updatedAt: now,
     };
@@ -875,7 +1003,7 @@ export function useChat() {
 
   const updateAgent = useCallback(async (
     id: string,
-    patch: Partial<Pick<Agent, "name" | "systemPrompt" | "description">>,
+    patch: Partial<Pick<Agent, "name" | "systemPrompt" | "description" | "toolIds" | "isRouter">>,
   ) => {
     // Read from in-memory state before the updater runs to avoid a stale DB round-trip
     const current = agents.find((a) => a.id === id);
@@ -1407,20 +1535,126 @@ export function useChat() {
     }
   }, [config]);
 
+  /**
+   * Shared core: save a data URL as a blob, caption it with Gemma (or use
+   * a fallback), embed the caption, and return the unsaved KnowledgeChunk.
+   * Does NOT update UI state — callers own progress/status management.
+   */
+  const captionAndEmbedImage = useCallback(async (
+    dataUrl: string,
+    sourceName: string,
+  ): Promise<KnowledgeChunk> => {
+    const imageRef = await saveImageAsBlob(dataUrl);
+    let caption = `Image: ${sourceName}`;
+    if (llmBackend !== "mock") {
+      try {
+        let accumulated = "";
+        await generateStream(
+          [{ role: "user", content: "Describe this image in detail for search indexing. Include objects, colours, text, scene type, and notable features." }],
+          "",
+          {
+            imageDataUrl: dataUrl,
+            config: config!,
+            modelId: activeLlmModelId ?? undefined,
+            systemInstruction: "You are an image description assistant. Be specific and detailed.",
+          },
+          {
+            onChunk: (t: string) => { accumulated += t; },
+            onDone: () => {},
+            onError: (e: string) => { throw new Error(e); },
+          },
+        );
+        if (accumulated.trim()) caption = accumulated.trim();
+      } catch { /* fallback caption already set */ }
+    }
+    const embedding = await embed(caption, modelsLoaded.current ? EMBED_MODEL_ID : undefined);
+    return {
+      id: uuidv4(),
+      source: sourceName,
+      text: caption,
+      embedding,
+      imageRef,
+      createdAt: new Date().toISOString(),
+    };
+  }, [config, llmBackend, activeLlmModelId]);
+
   const ingestPdf = useCallback(async (file: File) => {
     setStatus("embedding");
     setError(null);
     try {
-      const buffer = await file.arrayBuffer();
-      const text = await extractPdfText(buffer);
-      if (!text.trim()) throw new Error("No text found in PDF");
-      // ingestText owns status transitions from here
-      await ingestText(file.name, text);
+      // Each pdf.js call gets its own ArrayBuffer — pdf.js transfers (detaches)
+      // the buffer it receives, so reusing one buffer across calls throws
+      // "Cannot perform Construct on a detached ArrayBuffer".
+      const { images } = await extractPdfContent(await file.arrayBuffer());
+      const pages = await extractPdfPages(await file.arrayBuffer());
+      if (pages.length === 0 && images.length === 0) throw new Error("No content found in PDF");
+
+      // Persist raw PDF bytes to disk via Rust, then store the path in CBL
+      // so PDF tools (get_pdf_page, view_pdf_page) can locate the file by name.
+      // Re-read the file buffer here to guard against any internal consumption
+      // by pdf.js; this also gives us a fresh ArrayBuffer for encoding.
+      if (isTauri()) {
+        try {
+          const rawBuffer = await file.arrayBuffer();
+          const bytes = new Uint8Array(rawBuffer);
+          // Build base64 in chunks to avoid call-stack overflow on large files.
+          let binary = "";
+          const step = 8192;
+          for (let i = 0; i < bytes.length; i += step) {
+            binary += String.fromCharCode(...bytes.subarray(i, Math.min(i + step, bytes.length)));
+          }
+          const b64 = btoa(binary);
+          const { invoke } = await import("@tauri-apps/api/core");
+          const savedPath = await invoke<string>("save_pdf", { filename: file.name, dataB64: b64 });
+          await savePdfRecord(file.name, savedPath);
+        } catch (e) {
+          // Surface as a warning rather than failing the whole ingest — text
+          // content is still usable even if the raw file couldn't be saved.
+          console.warn("[ingestPdf] Failed to save PDF file for page tools:", e);
+          if (isMountedRef.current) setError(`PDF saved to knowledge base, but file storage failed (page tools unavailable): ${String(e)}`);
+        }
+      }
+
+      // Per-page text chunking — preserves page number in every chunk
+      const savedIds: string[] = [];
+      const allChunks = pages.flatMap(({ text: pageText, pageNumber }) =>
+        splitIntoChunks(pageText, config?.chunkSize, config?.chunkOverlap).map((text) => ({ text, pageNumber })),
+      );
+      const total = allChunks.length + images.length;
+      if (isMountedRef.current) setIngestProgress({ done: 0, total, source: file.name });
+      for (let i = 0; i < allChunks.length; i++) {
+        const { text, pageNumber } = allChunks[i];
+        const embedding = await embed(text, modelsLoaded.current ? EMBED_MODEL_ID : undefined);
+        const chunk: KnowledgeChunk = { id: uuidv4(), source: file.name, text, embedding, pageNumber, createdAt: new Date().toISOString() };
+        await saveKnowledgeChunk(chunk);
+        savedIds.push(chunk.id);
+        if (isMountedRef.current) {
+          setKnowledgeChunks((prev) => [chunk, ...prev]);
+          setIngestProgress({ done: i + 1, total, source: file.name });
+        }
+      }
+
+      // Embedded images — caption + embed each one
+      for (let i = 0; i < images.length; i++) {
+        const { dataUrl, pageNum } = images[i];
+        const label = `${file.name} p.${pageNum} img${i + 1}`;
+        if (isMountedRef.current) setIngestProgress({ done: allChunks.length + i, total, source: file.name });
+        try {
+          setStatus("embedding");
+          const chunk = await captionAndEmbedImage(dataUrl, label);
+          // Group under the PDF filename so delete-by-source removes everything
+          const chunkUnderPdf = { ...chunk, source: file.name };
+          await saveKnowledgeChunk(chunkUnderPdf);
+          if (isMountedRef.current) setKnowledgeChunks((prev) => [chunkUnderPdf, ...prev]);
+        } catch { /* skip failed image, continue */ }
+        if (isMountedRef.current) setIngestProgress({ done: allChunks.length + i + 1, total, source: file.name });
+      }
+
+      if (isMountedRef.current) { setIngestProgress(null); setStatus("ready"); }
     } catch (err) {
-      // Only reached for pre-ingest failures (arrayBuffer, extractPdfText)
-      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+      if (isMountedRef.current) { setIngestProgress(null); setError(String(err)); setStatus("error"); }
     }
-  }, [ingestText]);
+  }, [captionAndEmbedImage, config?.chunkSize, config?.chunkOverlap]);
 
   const ingestUrl = useCallback(async (url: string) => {
     setStatus("embedding");
@@ -1436,6 +1670,64 @@ export function useChat() {
     }
   }, [ingestText]);
 
+  const ingestImage = useCallback(async (file: File) => {
+    if (sendingRef.current) {
+      if (isMountedRef.current) setError("Cannot ingest while a response is being generated.");
+      return;
+    }
+    setStatus("embedding");
+    setError(null);
+    let savedId: string | null = null;
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result as string);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      if (isMountedRef.current) setIngestProgress({ done: 0, total: 1, source: file.name });
+      const chunk = await captionAndEmbedImage(dataUrl, file.name);
+      await saveKnowledgeChunk(chunk);
+      savedId = chunk.id;
+      if (isMountedRef.current) {
+        setKnowledgeChunks((prev) => [chunk, ...prev]);
+        setIngestProgress({ done: 1, total: 1, source: file.name });
+      }
+      if (isMountedRef.current) { setIngestProgress(null); setStatus("ready"); }
+    } catch (err) {
+      if (savedId) await deleteKnowledgeChunk(savedId).catch(() => {});
+      if (isMountedRef.current) {
+        if (savedId) setKnowledgeChunks((prev) => prev.filter((c) => c.id !== savedId));
+        setIngestProgress(null);
+        setError(String(err));
+        setStatus("error");
+      }
+    }
+  }, [captionAndEmbedImage]);
+
+  /** Render a PDF page and inject it as an assistant message in the active conversation. */
+  const viewPdfPage = useCallback(async (filename: string, page: number) => {
+    const path = await getPdfPath(filename);
+    if (!path) { console.warn("[viewPdfPage] PDF not found:", filename); return; }
+    const { invoke } = await import("@tauri-apps/api/core");
+    const b64 = await invoke<string>("read_pdf_bytes", { path });
+    const raw = atob(b64);
+    const bytes = new Uint8Array(raw.length);
+    for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    const dataUrl = await renderPdfPage(bytes.buffer, page);
+    if (!activeConvIdRef.current) return;
+    const imgMsg: Message = {
+      id: uuidv4(),
+      conversationId: activeConvIdRef.current,
+      role: "assistant",
+      content: `Page ${page} of "${filename}"`,
+      imageDataUrl: dataUrl,
+      createdAt: new Date().toISOString(),
+    };
+    await saveMessage(imgMsg);
+    if (isMountedRef.current) setMessages((prev) => [...prev, imgMsg]);
+  }, []);
+
   const removeKnowledgeChunk = useCallback(async (id: string) => {
     await deleteKnowledgeChunk(id);
     if (isMountedRef.current) setKnowledgeChunks((prev) => prev.filter((c) => c.id !== id));
@@ -1446,16 +1738,24 @@ export function useChat() {
     if (isMountedRef.current) setKnowledgeChunks((prev) => prev.filter((c) => c.source !== source));
   }, []);
 
-  const activeAgent = agents.find((a) => a.id === activeAgentId) ?? null;
+  const activeAgent =
+    activeAgentId === ROUTER_AGENT_ID
+      ? { id: ROUTER_AGENT_ID, name: "Router", systemPrompt: "", description: "Routes messages to the most appropriate agent", toolIds: [], createdAt: "", updatedAt: "" } as import("../lib/types").Agent
+      : activeAgentId === AGENT_MANAGER_ID
+        ? { id: AGENT_MANAGER_ID, name: "Agent Manager", systemPrompt: "", description: "Manage agents", toolIds: [], createdAt: "", updatedAt: "" } as import("../lib/types").Agent
+        : (agents.find((a) => a.id === activeAgentId) ?? null);
 
   return {
     status, error,
     config, conversations, activeConvId, messages, knowledgeChunks,
     streamingContent, streamingTokensPerSec, streamingTokenCount, lastRagChunks, lastToolExecutions,
     ragEnabled, setRagEnabled,
-    allTools: knowledgeSearchToolRef.current
-      ? [knowledgeSearchToolRef.current, ...ALL_TOOLS]
-      : ALL_TOOLS,
+    allTools: [
+      ...(knowledgeSearchToolRef.current ? [knowledgeSearchToolRef.current] : []),
+      ...pdfToolsRef.current,
+      ...sourceToolsRef.current,
+      ...ALL_TOOLS,
+    ],
     enabledToolIds, setEnabledToolIds,
     embeddingStatus, embeddingBackend, llmBackend,
     activeLlmModelId, activeEmbedModelId,
@@ -1473,7 +1773,8 @@ export function useChat() {
     getRagChunksForMessage,
     reEmbedAll, cancelReEmbed, reEmbedProgress,
     ingestProgress,
-    ingestText, ingestPdf, ingestUrl, removeKnowledgeChunk, removeKnowledgeBySource,
+    viewPdfPage,
+    ingestText, ingestPdf, ingestUrl, ingestImage, removeKnowledgeChunk, removeKnowledgeBySource,
     createAgent, updateAgent, removeAgent,
     clearError: () => setError(null),
   };

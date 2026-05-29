@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useMemo, useEffect } from "react";
 import { useTheme } from "./hooks/useTheme";
 import { useChat } from "./hooks/useChat";
+import type { SidebarSection } from "./components/Sidebar";
 import { useVoiceInput } from "./hooks/useVoiceInput";
 import { useWakeWord } from "./hooks/useWakeWord";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
@@ -8,8 +9,7 @@ import { Sidebar } from "./components/Sidebar";
 import { ChatPane } from "./components/ChatPane";
 import { KnowledgePanel } from "./components/KnowledgePanel";
 import { SettingsPanel } from "./components/SettingsPanel";
-import { ToolsPanel } from "./components/ToolsPanel";
-import { AgentsPanel } from "./components/AgentsPanel";
+import { AgentEditorPane } from "./components/AgentEditorPane";
 import { ModelManagerPanel } from "./components/ModelManagerPanel";
 import { SearchPanel } from "./components/SearchPanel";
 import { WebGpuBanner } from "./components/WebGpuBanner";
@@ -19,7 +19,7 @@ import type { EmbeddingStatus, RetrievedChunk } from "./lib/rag";
 import type { LlmBackend, ApiConfig, WebLlmOptions, ModelPreset } from "./lib/llm";
 import "./App.css";
 
-type Modal = "knowledge" | "settings" | "tools" | "agents" | "models" | "search" | null;
+type Modal = "models" | "search" | null;
 type ToolbarPanel = "none" | "presets" | "llm" | "api" | "embed";
 
 // ── Backend status badges ──────────────────────────────────────────────────
@@ -52,7 +52,6 @@ function LlmBadge({ backend }: { backend: LlmBackend }) {
 function Toolbar({
   embeddingStatus, llmBackend, isWebLlmLoaded,
   ragEnabled, onRagToggle,
-  activeToolCount, onShowTools,
   theme, onToggleTheme,
   wakeWordState, onToggleWakeWord,
   onLoadPreset, onLoadWebLlm, onUnloadWebLlm, onConfigureApi, onInitEmbedModel,
@@ -63,8 +62,6 @@ function Toolbar({
   isWebLlmLoaded: boolean;
   ragEnabled: boolean;
   onRagToggle: (v: boolean) => void;
-  activeToolCount: number;
-  onShowTools: () => void;
   theme: "dark" | "light";
   onToggleTheme: () => void;
   wakeWordState: import("./hooks/useWakeWord").WakeWordState;
@@ -117,20 +114,13 @@ function Toolbar({
           RAG
         </label>
         <button
-          className={`tools-badge-btn ${activeToolCount > 0 ? "active" : ""}`}
-          onClick={onShowTools}
-          title="Manage tools"
-        >
-          🛠️ {activeToolCount > 0 ? `${activeToolCount} tool${activeToolCount > 1 ? "s" : ""}` : "Tools"}
-        </button>
-        <button
           className={`wake-word-btn ${wakeWordState === "listening" ? "listening" : ""} ${wakeWordState === "detected" ? "detected" : ""} ${wakeWordState === "loading" ? "loading" : ""} ${wakeWordState === "error" ? "error" : ""}`}
           onClick={onToggleWakeWord}
           title={
             wakeWordState === "idle"     ? "Enable wake word detection" :
-            wakeWordState === "loading"  ? "Loading Porcupine…" :
+            wakeWordState === "loading"  ? "Loading Whisper + VAD…" :
             wakeWordState === "listening"? "Wake word active — click to stop" :
-            wakeWordState === "detected" ? "Wake word detected!" :
+            wakeWordState === "detected" ? "Wake phrase detected!" :
             "Wake word error — click to retry"
           }
         >
@@ -304,10 +294,16 @@ export default function App() {
   const chat = useChat();
   const { theme, toggleTheme } = useTheme();
   const [modal, setModal] = useState<Modal>(null);
+  const [section, setSection] = useState<SidebarSection>("conversations");
   const [ragDebugVisible, setRagDebugVisible] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [voiceInput, setVoiceInput] = useState("");
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  // Track which agent is open in the Agent Manager pane (null=none, "new"=create form)
+  const [activeEditAgentId, setActiveEditAgentId] = useState<string | null | "new">(null);
+  // Knowledge panel state
+  const [activeKnowledgeSource, setActiveKnowledgeSource] = useState<string | null>(null);
+  const [showKnowledgeModal, setShowKnowledgeModal] = useState(false);
   const chatInputRef = useRef<HTMLTextAreaElement>(null);
   // Holds the cancel function for any in-flight jumpToMessage retry loop so
   // pending timers are cleared when the component unmounts.
@@ -394,9 +390,9 @@ export default function App() {
     onNewConversation: handleNewConversation,
     onFocusInput: () => chatInputRef.current?.focus(),
     onOpenSearch: openSearch,
-    onOpenKnowledge: () => setModal("knowledge"),
-    onOpenAgents: () => setModal("agents"),
-    onOpenSettings: () => setModal("settings"),
+    onOpenKnowledge: () => setSection("knowledge"),
+    onOpenAgents: () => setSection("agents"),
+    onOpenSettings: () => setSection("settings"),
     onEscape: () => {
       if (modal) { setModal(null); return; }
       if (chat.status === "generating") chat.stopGeneration();
@@ -405,19 +401,28 @@ export default function App() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [modal, chat.status]));
 
-  // Wake word — triggers voice.start() when keyword detected
+  // Pause VAD while voice recording is active (avoids mic contention on Android).
+  // voice must be declared before wakeWord so we can reference wakeWord below.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const wakeWordRef = useRef<import("./hooks/useWakeWord").UseWakeWordReturn | null>(null);
+  useEffect(() => {
+    if (voice.state !== "idle") {
+      wakeWordRef.current?.pause();
+    } else {
+      wakeWordRef.current?.resume();
+    }
+  }, [voice.state]);
+
+  // Wake word — triggers voice.start() when phrase detected
   const wakeWord = useWakeWord({
-    accessKey: chat.config?.porcupineAccessKey ?? "",
-    keyword: chat.config?.porcupineKeyword ?? "Jarvis",
-    sensitivity: chat.config?.porcupineSensitivity ?? 0.5,
+    wakePhrase: chat.config?.wakePhrase ?? "jarvis",
+    whisperModelId: chat.config?.whisperModelId || undefined,
     onDetected: useCallback(() => {
-      // Check state and workerStatus individually so this callback isn't
-      // recreated on every voice state change (the whole `voice` object
-      // is a new reference each render).
       if (voice.state === "idle" && voice.workerStatus !== "loading") voice.start();
     }, [voice.state, voice.workerStatus, voice.start]),
     onError: useCallback((msg: string) => setVoiceError(msg), []),
   });
+  wakeWordRef.current = wakeWord;
 
   // Derive context window length in priority order:
   //   1. config.contextLength (user-set or auto-set when loading from catalogue)
@@ -434,6 +439,13 @@ export default function App() {
     return 0;
   }, [chat.activeLlmModelId, chat.config?.contextLength]);
 
+  // Derive unique knowledge sources from chunks for the sidebar list
+  const knowledgeSources = useMemo(() => {
+    const map = new Map<string, number>();
+    for (const c of chat.knowledgeChunks) map.set(c.source, (map.get(c.source) ?? 0) + 1);
+    return Array.from(map.entries()).map(([name, count]) => ({ name, count }));
+  }, [chat.knowledgeChunks]);
+
   // Active system prompt for context window calculation — mirrors the priority
   // order used in sendMessage: agent > conversation instruction > default.
   const activeSystemPrompt = useMemo(() => {
@@ -445,9 +457,10 @@ export default function App() {
     );
   }, [chat.activeAgent, chat.conversations, chat.activeConvId]);
 
-  // Show splash for the full initial load (config is set mid-init, so we
-  // can't use !config as the gate — check for conversations not yet loaded).
-  const isInitialising = chat.status === "loading-models" && chat.conversations.length === 0;
+  // Show splash for the full initial load. Include "idle" (the pre-effect
+  // state on the very first render) so config is never null when the main UI
+  // becomes visible for the first time.
+  const isInitialising = (chat.status === "idle" || chat.status === "loading-models") && chat.conversations.length === 0;
   if (isInitialising) {
     return (
       <div className="splash">
@@ -465,6 +478,8 @@ export default function App() {
       )}
       <div className={`sidebar-wrap ${sidebarOpen ? "open" : ""}`}>
         <Sidebar
+          section={section}
+          onSectionChange={(s) => { setSection(s); setSidebarOpen(false); if (s !== "knowledge") setActiveKnowledgeSource(null); }}
           conversations={chat.conversations}
           activeConvId={chat.activeConvId}
           onSelect={(id) => { chat.selectConversation(id); setSidebarOpen(false); }}
@@ -474,14 +489,23 @@ export default function App() {
           onUpdateInstruction={chat.updateConversationInstruction}
           onExport={chat.exportConversation}
           onSearch={chat.searchConversations}
-          onShowKnowledge={() => { setModal("knowledge"); setSidebarOpen(false); }}
-          onShowAgents={() => { setModal("agents"); setSidebarOpen(false); }}
-          onShowTools={() => { setModal("tools"); setSidebarOpen(false); }}
-          onShowSettings={() => { setModal("settings"); setSidebarOpen(false); }}
           onShowSearch={() => { openSearch(); setSidebarOpen(false); }}
           onSummarise={() => { chat.summarizeConversation(); setSidebarOpen(false); }}
           isGenerating={chat.status === "generating"}
-          activeAgent={chat.activeAgent}
+          onShowKnowledge={() => { setSection("knowledge"); setSidebarOpen(false); }}
+          agents={chat.agents}
+          activeEditAgentId={activeEditAgentId}
+          onSelectAgent={(id) => setActiveEditAgentId(id)}
+          onCreateAgent={() => setActiveEditAgentId("new")}
+          onDeleteAgent={(id) => {
+            chat.removeAgent(id);
+            if (activeEditAgentId === id) setActiveEditAgentId(null);
+          }}
+          knowledgeSources={knowledgeSources}
+          activeKnowledgeSource={activeKnowledgeSource}
+          onSelectKnowledgeSource={setActiveKnowledgeSource}
+          onDeleteKnowledgeSource={(source) => { chat.removeKnowledgeBySource(source); if (activeKnowledgeSource === source) setActiveKnowledgeSource(null); }}
+          onAddKnowledge={() => setShowKnowledgeModal(true)}
         />
       </div>
 
@@ -501,8 +525,6 @@ export default function App() {
           isWebLlmLoaded={chat.llmBackend === "mediapipe"}
           ragEnabled={chat.ragEnabled}
           onRagToggle={chat.setRagEnabled}
-          activeToolCount={chat.enabledToolIds.size}
-          onShowTools={() => setModal("tools")}
           theme={theme}
           onToggleTheme={toggleTheme}
           wakeWordState={wakeWord.state}
@@ -551,87 +573,96 @@ export default function App() {
         )}
         {ragDebugVisible && <RagDebugPanel chunks={chat.lastRagChunks} />}
 
-        <ChatPane
-          messages={chat.messages}
-          streamingContent={chat.streamingContent}
-          streamingTokensPerSec={chat.streamingTokensPerSec}
-          status={chat.status}
-          voice={voice}
-          voiceInput={voiceInput}
-          voiceError={voiceError}
-          onVoiceInputChange={setVoiceInput}
-          onVoiceErrorDismiss={() => setVoiceError(null)}
-          onSend={chat.sendMessage}
-          onStop={chat.stopGeneration}
-          onEdit={chat.editMessage}
-          onBranch={chat.branchConversation}
-          onBookmark={chat.toggleBookmark}
-          onFetchRagChunks={chat.getRagChunksForMessage}
-          inputRef={chatInputRef}
-          ragChunks={chat.lastRagChunks}
-          systemPrompt={activeSystemPrompt}
-          contextLength={contextLength}
-          maxTokens={chat.config?.maxTokens}
-          tokensGenerated={chat.streamingTokenCount}
-        />
+        {section !== "conversations" && (
+          <button
+            className="back-to-chat-btn"
+            onClick={() => setSection("conversations")}
+            aria-label="Back to chat"
+          >
+            ← Back
+          </button>
+        )}
+
+        {section === "knowledge" ? (
+          <KnowledgePanel
+            embedded
+            chunks={chat.knowledgeChunks}
+            status={chat.status}
+            onIngest={chat.ingestText}
+            onIngestPdf={chat.ingestPdf}
+            onIngestUrl={chat.ingestUrl}
+            onIngestImage={chat.ingestImage}
+            onDelete={chat.removeKnowledgeChunk}
+            onDeleteBySource={(source) => { chat.removeKnowledgeBySource(source); if (activeKnowledgeSource === source) setActiveKnowledgeSource(null); }}
+            onReEmbedAll={chat.reEmbedAll}
+            onCancelReEmbed={chat.cancelReEmbed}
+            reEmbedProgress={chat.reEmbedProgress}
+            ingestProgress={chat.ingestProgress}
+            onClose={() => setSection("conversations")}
+            filterSource={activeKnowledgeSource}
+            onClearFilter={() => setActiveKnowledgeSource(null)}
+          />
+        ) : section === "agents" ? (
+          <AgentEditorPane
+            editingAgentId={activeEditAgentId}
+            agents={chat.agents}
+            allTools={chat.allTools}
+            onCreate={(name, prompt, desc, toolIds) => chat.createAgent(name, prompt, desc, toolIds)}
+            onUpdate={(id, patch) => chat.updateAgent(id, patch)}
+            onCreated={(agent) => setActiveEditAgentId(agent.id)}
+            onDone={() => setSection("conversations")}
+          />
+        ) : section === "settings" && chat.config ? (
+          <SettingsPanel
+            embedded
+            config={chat.config}
+            onSave={chat.updateConfig}
+            onClose={() => setSection("conversations")}
+          />
+        ) : (
+          <ChatPane
+            messages={chat.messages}
+            streamingContent={chat.streamingContent}
+            streamingTokensPerSec={chat.streamingTokensPerSec}
+            status={chat.status}
+            voice={voice}
+            voiceInput={voiceInput}
+            voiceError={voiceError}
+            onVoiceInputChange={setVoiceInput}
+            onVoiceErrorDismiss={() => setVoiceError(null)}
+            onSend={chat.sendMessage}
+            onStop={chat.stopGeneration}
+            onEdit={chat.editMessage}
+            onBranch={chat.branchConversation}
+            onBookmark={chat.toggleBookmark}
+            onFetchRagChunks={chat.getRagChunksForMessage}
+            inputRef={chatInputRef}
+            ragChunks={chat.lastRagChunks}
+            systemPrompt={activeSystemPrompt}
+            contextLength={contextLength}
+            maxTokens={chat.config?.maxTokens}
+            tokensGenerated={chat.streamingTokenCount}
+            toolExecutions={chat.lastToolExecutions}
+          />
+        )}
       </main>
 
-      {modal === "knowledge" && chat.config && (
-        <div role="dialog" aria-modal="true" aria-label="Knowledge Base">
+      {showKnowledgeModal && (
+        <div role="dialog" aria-modal="true" aria-label="Add to Knowledge Base">
           <KnowledgePanel
             chunks={chat.knowledgeChunks}
             status={chat.status}
             onIngest={chat.ingestText}
             onIngestPdf={chat.ingestPdf}
             onIngestUrl={chat.ingestUrl}
+            onIngestImage={chat.ingestImage}
             onDelete={chat.removeKnowledgeChunk}
             onDeleteBySource={chat.removeKnowledgeBySource}
             onReEmbedAll={chat.reEmbedAll}
             onCancelReEmbed={chat.cancelReEmbed}
             reEmbedProgress={chat.reEmbedProgress}
             ingestProgress={chat.ingestProgress}
-            onClose={() => setModal(null)}
-          />
-        </div>
-      )}
-
-      {modal === "settings" && chat.config && (
-        <div role="dialog" aria-modal="true" aria-label="Settings">
-          <SettingsPanel
-            config={chat.config}
-            onSave={chat.updateConfig}
-            onClose={() => setModal(null)}
-          />
-        </div>
-      )}
-
-      {modal === "agents" && (
-        <div role="dialog" aria-modal="true" aria-label="Agents">
-          <AgentsPanel
-            agents={chat.agents}
-            activeAgentId={chat.activeAgentId}
-            onSelect={chat.setActiveAgentId}
-            onCreate={chat.createAgent}
-            onUpdate={chat.updateAgent}
-            onDelete={chat.removeAgent}
-            onClose={() => setModal(null)}
-          />
-        </div>
-      )}
-
-      {modal === "tools" && (
-        <div role="dialog" aria-modal="true" aria-label="Tools">
-          <ToolsPanel
-            allTools={chat.allTools}
-            enabledToolIds={chat.enabledToolIds}
-            onToggle={(id, enabled) => {
-              const next = new Set(chat.enabledToolIds);
-              if (enabled) next.add(id);
-              else next.delete(id);
-              chat.setEnabledToolIds(next);
-            }}
-            lastExecutions={chat.lastToolExecutions}
-            onClose={() => setModal(null)}
+            onClose={() => setShowKnowledgeModal(false)}
           />
         </div>
       )}

@@ -1,14 +1,15 @@
 /**
  * urlIngest.ts — Fetch a URL and extract readable text.
  *
- * On Tauri (desktop/Android): direct fetch — no CORS restriction.
- * On web: direct fetch is attempted first (works for CORS-permissive servers).
- *         If it fails with a network/CORS error, a clear message is shown
- *         rather than routing traffic through a third-party proxy.
+ * On Tauri (desktop/Android): delegates to the Rust `fetch_url` command via
+ * `invoke`, which uses reqwest and bypasses WebView CORS restrictions.
+ * On web: direct fetch is attempted (works for CORS-permissive servers).
  *
  * Text extraction strips HTML tags, collapses whitespace, and removes
  * script/style content.
  */
+
+import { invoke } from "@tauri-apps/api/core";
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -44,25 +45,17 @@ function htmlToText(html: string): string {
 export async function fetchUrlText(url: string): Promise<{ text: string; title: string }> {
   let html: string;
 
-  // AbortSignal.timeout() is not available on Safari < 15.4 (Vite target
-  // includes safari13). Use a manual AbortController + setTimeout instead.
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(new Error("Request timed out after 30 s")), 30_000);
-  const timeout = controller.signal;
-
-  try {
   if (isTauri()) {
-    // Tauri: direct fetch, no CORS restriction
-    const res = await fetch(url, { signal: timeout });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-    html = await res.text();
+    // Tauri: use Rust/reqwest to bypass WebView CORS restrictions
+    html = await invoke<string>("fetch_url", { url });
   } else {
     // Web: attempt a direct fetch. Works for servers that send permissive
     // CORS headers (e.g. Wikipedia, many APIs). For servers that don't, the
-    // browser will block the request — we surface a clear error rather than
-    // routing user URLs through a third-party proxy.
+    // browser will block the request — we surface a clear error.
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(new Error("Request timed out after 30 s")), 30_000);
     try {
-      const res = await fetch(url, { signal: timeout });
+      const res = await fetch(url, { signal: controller.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
       html = await res.text();
     } catch (e) {
@@ -78,11 +71,9 @@ export async function fetchUrlText(url: string): Promise<{ text: string; title: 
         );
       }
       throw e;
+    } finally {
+      clearTimeout(timeoutId);
     }
-  }
-
-  } finally {
-    clearTimeout(timeoutId);
   }
 
   // Extract <title>

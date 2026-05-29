@@ -5,6 +5,14 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{AppHandle, Emitter, Manager, State};
 
+// ── Shared HTTP client (cookie store, browser UA) ────────────────────────────
+
+/// Persistent reqwest client shared across all `fetch_url` calls.
+/// Using a single client means cookies are retained between requests,
+/// so SearXNG session cookies established on the first request are
+/// reused on subsequent search requests — just like a browser would.
+struct HttpClient(reqwest::Client);
+
 // ── Active download cancellation ─────────────────────────────────────────────
 
 /// Holds a cancellation sender for each in-progress download keyed by model ID.
@@ -156,6 +164,151 @@ async fn get_model_path(app: AppHandle, file_name: String) -> Result<Option<Stri
     Ok(if path.exists() { Some(path.to_string_lossy().into_owned()) } else { None })
 }
 
+/// Read and remove a JSON config import file.
+/// Checks several candidate locations so it works regardless of how Tauri
+/// maps app_data_dir on a given platform:
+///   1. app_data_dir()/config.json          (internal storage on Android, standard on desktop)
+///   2. /sdcard/Android/data/<pkg>/files/config.json  (external files dir on Android)
+/// Returns the raw JSON string when found, null when absent.
+#[tauri::command]
+async fn read_config_import(app: AppHandle) -> Result<Option<String>, String> {
+    let mut candidates: Vec<std::path::PathBuf> = Vec::new();
+
+    if let Ok(d) = app.path().app_data_dir() {
+        candidates.push(d.join("config.json"));
+    }
+
+    // Android external files dir: /sdcard/Android/data/<package>/files/config.json
+    // Construct from the bundle identifier so it stays correct across package renames.
+    let pkg = app.config().identifier.to_string();
+    candidates.push(std::path::PathBuf::from(format!(
+        "/sdcard/Android/data/{pkg}/files/config.json"
+    )));
+
+    for path in &candidates {
+        if path.exists() {
+            let contents = tokio::fs::read_to_string(path)
+                .await
+                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            // Remove after reading so it only imports once.
+            let _ = tokio::fs::remove_file(path).await;
+            return Ok(Some(contents));
+        }
+    }
+    Ok(None)
+}
+
+/// Fetch a URL server-side (bypasses WebView CORS restrictions on Android).
+/// Uses the shared HTTP client with a persistent cookie store so that
+/// session cookies (e.g. from SearXNG) are retained across requests.
+/// Returns the response body as a UTF-8 string.
+#[tauri::command]
+async fn fetch_url(http: State<'_, HttpClient>, url: String) -> Result<String, String> {
+    let response = http.0
+        .get(&url)
+        .header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+        .header("Accept-Language", "en-US,en;q=0.5")
+        .header("Accept-Encoding", "gzip, deflate, br")
+        .send()
+        .await
+        .map_err(|e| format!("fetch {url}: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("HTTP {} for {url}", response.status()));
+    }
+    response.text().await.map_err(|e| format!("read body: {e}"))
+}
+
+/// Save a base64-encoded PDF to {app_local_data_dir}/pdfs/<filename>.
+/// Returns the absolute path to the saved file.
+#[tauri::command]
+async fn save_pdf(app: AppHandle, filename: String, data_b64: String) -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let bytes = STANDARD
+        .decode(data_b64.as_bytes())
+        .map_err(|e| format!("base64 decode: {e}"))?;
+    let data_dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app_local_data_dir: {e}"))?;
+    let pdfs_dir = data_dir.join("pdfs");
+    tokio::fs::create_dir_all(&pdfs_dir)
+        .await
+        .map_err(|e| format!("create pdfs dir: {e}"))?;
+    let dest = pdfs_dir.join(&filename);
+    tokio::fs::write(&dest, &bytes)
+        .await
+        .map_err(|e| format!("write {}: {e}", dest.display()))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
+/// Read a file and return its contents as a base64 string.
+/// Used by the PDF tools to load stored PDFs for text extraction.
+#[tauri::command]
+async fn read_pdf_bytes(path: String) -> Result<String, String> {
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let bytes = tokio::fs::read(&path)
+        .await
+        .map_err(|e| format!("read {path}: {e}"))?;
+    Ok(STANDARD.encode(&bytes))
+}
+
+/// Open a PDF file in the system viewer at the specified page (1-based).
+/// On Linux tries evince then okular then xdg-open.
+/// On macOS uses `open`. On Windows uses `start`.
+#[tauri::command]
+async fn open_pdf_page(path: String, page: u32) -> Result<(), String> {
+    #[cfg(target_os = "linux")]
+    {
+        // evince supports --page-label (1-based page number)
+        if std::process::Command::new("evince")
+            .arg("--page-label")
+            .arg(page.to_string())
+            .arg(&path)
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+        // okular supports -p (1-based)
+        if std::process::Command::new("okular")
+            .arg("-p")
+            .arg(page.to_string())
+            .arg(&path)
+            .spawn()
+            .is_ok()
+        {
+            return Ok(());
+        }
+        // Fallback: open without page support
+        std::process::Command::new("xdg-open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("xdg-open failed: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = page; // macOS open doesn't easily support page numbers
+        std::process::Command::new("open")
+            .arg(&path)
+            .spawn()
+            .map_err(|e| format!("open failed: {e}"))?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let _ = page;
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", &path])
+            .spawn()
+            .map_err(|e| format!("start failed: {e}"))?;
+    }
+    #[cfg(target_os = "android")]
+    {
+        let _ = (path, page);
+        return Err("open_pdf_page not supported on Android".into());
+    }
+    Ok(())
+}
+
 /// Delete a cached model file from the app local data dir.
 #[tauri::command]
 async fn delete_model_file(app: AppHandle, file_name: String) -> Result<(), String> {
@@ -176,16 +329,29 @@ async fn delete_model_file(app: AppHandle, file_name: String) -> Result<(), Stri
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let http_client = reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36")
+        .cookie_store(true)
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("failed to build HTTP client");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_cblite::init())
         .plugin(tauri_plugin_litert::init())
+        .manage(HttpClient(http_client))
         .manage(Downloads(Mutex::new(HashMap::new())))
         .invoke_handler(tauri::generate_handler![
             download_model,
             cancel_model_download,
             get_model_path,
             delete_model_file,
+            read_config_import,
+            fetch_url,
+            save_pdf,
+            read_pdf_bytes,
+            open_pdf_page,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

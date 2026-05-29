@@ -4,6 +4,7 @@ import { MessageBubble, StreamingBubble, ThinkingBubble } from "./MessageBubble"
 import type { UseVoiceInputReturn } from "../hooks/useVoiceInput";
 import type { Message, AppStatus } from "../lib/types";
 import type { RetrievedChunk } from "../lib/rag";
+import type { ToolExecution } from "../lib/tools";
 
 const TEMPLATES = [
   { icon: "📝", label: "Summarise",    prompt: "Summarise the key points from the documents in my knowledge base." },
@@ -38,6 +39,7 @@ interface Props {
   /** For ETA display in StreamingBubble */
   maxTokens?: number;
   tokensGenerated?: number;
+  toolExecutions?: ToolExecution[];
 }
 
 export function ChatPane({
@@ -62,6 +64,7 @@ export function ChatPane({
   contextLength = 0,
   maxTokens,
   tokensGenerated,
+  toolExecutions = [],
 }: Props) {
   const [input, setInput] = useState("");
   const [attachedImage, setAttachedImage] = useState<string | null>(null);
@@ -197,6 +200,7 @@ export function ChatPane({
             tokensPerSec={streamingTokensPerSec}
             maxTokens={maxTokens}
             tokensGenerated={tokensGenerated}
+            toolExecutions={toolExecutions}
           />
         )}
 

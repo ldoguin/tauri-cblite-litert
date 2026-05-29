@@ -6,8 +6,8 @@
  *   3. OpenAI-compatible API       — Groq, OpenRouter, Ollama, etc.
  *   4. Mock                        — word-by-word echo, always available
  *
- * The Function() trick in generateViaTauri() escapes Vite's static import
- * analysis so @tauri-apps/api is never bundled into the web build.
+ * generateViaTauri() uses a regular dynamic import for @tauri-apps/api/core;
+ * Vite bundles it correctly since @tauri-apps/api is an npm dependency.
  */
 
 import type { LlmInference } from "@mediapipe/tasks-genai";
@@ -83,6 +83,7 @@ export async function loadModels(config: ModelConfig): Promise<void> {
       modelPath: config.lmModelPath,
       accelerator: config.accelerator,
       maxTokens: config.maxTokens,
+      vision: true, // enable vision backend for multimodal models (Gemma 4 E2B/E4B)
     });
     setActiveLmModel(LM_MODEL_ID);
   }
@@ -176,6 +177,38 @@ export interface GenerateOptions {
 }
 
 const MAX_REACT_ITERATIONS = 5;
+
+/**
+ * Run a single non-streaming LLM call and return the full text response.
+ * Intended for internal tasks (e.g. routing decisions) that should not be
+ * shown in the UI. Uses no tools, no RAG context, and no conversation history.
+ */
+export async function generateOnce(
+  userText: string,
+  systemInstruction: string,
+  config: ModelConfig,
+  signal?: AbortSignal,
+): Promise<string> {
+  let result = "";
+  let rejected = false;
+  await new Promise<void>((resolve, reject) => {
+    generateStream(
+      [{ role: "user", content: userText }],
+      "",
+      { systemInstruction, config, enabledTools: [], signal },
+      {
+        onChunk: (c) => { result += c; },
+        onDone: () => resolve(),
+        onToolCall: () => {},
+        onToolResult: () => {},
+        onError: (e) => {
+          if (!rejected) { rejected = true; reject(new Error(e)); }
+        },
+      },
+    ).catch((e) => { if (!rejected) { rejected = true; reject(e); } });
+  });
+  return result;
+}
 
 /**
  * Stream a response from the active LLM backend.
@@ -367,10 +400,8 @@ async function generateViaTauri(
   // Bail immediately if the signal was already aborted before we started.
   if (opts.signal?.aborted) { await callbacks.onDone(0); return; }
 
-  // Function() escapes Vite's static import analysis — @tauri-apps/api must
-  // never be bundled into the web build; it is injected by the Tauri webview.
-  const tauriImport = new Function("specifier", "return import(specifier)");
-  const { invoke, listen } = await tauriImport("@tauri-apps/api/core");
+  const { invoke } = await import("@tauri-apps/api/core");
+  const { listen } = await import("@tauri-apps/api/event");
 
   type ChunkPayload = { chunk: string; done: boolean; latencyMs?: number; error?: string };
   const unlistenHolder: { fn: (() => void) | null } = { fn: null };
@@ -413,12 +444,16 @@ async function generateViaTauri(
       return;
     }
 
-    const prompt = messages
+    // Truncate history to fit within the model's token budget.
+    // Reserve 25% of maxTokens for output; estimate 4 chars/token for input.
+    const fittedMessages = truncateToFitTokens(messages, opts.config.maxTokens);
+
+    const prompt = fittedMessages
       .filter((m) => m.role !== "system")
       .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
       .join("\n") + "\nAssistant:";
 
-    const systemInstruction = messages.find((m) => m.role === "system")?.content;
+    const systemInstruction = fittedMessages.find((m) => m.role === "system")?.content;
 
     // Extract raw base64 bytes from the data URL for the plugin's image input
     const imageBase64 = opts.imageDataUrl
@@ -687,6 +722,33 @@ async function generateMock(
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
+
+/**
+ * Drop oldest non-system messages until the flattened prompt fits within the
+ * model's token budget (estimated at 4 chars/token, reserving 25% for output).
+ * Always keeps at least the system message + the last user turn.
+ */
+function truncateToFitTokens(
+  messages: Array<{ role: string; content: string }>,
+  maxTokens: number,
+): Array<{ role: string; content: string }> {
+  const CHARS_PER_TOKEN = 4;
+  const maxInputChars = Math.floor(maxTokens * 0.75) * CHARS_PER_TOKEN;
+
+  const system = messages.filter((m) => m.role === "system");
+  let history = messages.filter((m) => m.role !== "system");
+
+  const promptLen = (msgs: Array<{ role: string; content: string }>) =>
+    msgs.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`).join("\n").length +
+    "\nAssistant:".length;
+
+  // Drop from the front (oldest turns) until it fits, keeping at least the last message.
+  while (history.length > 1 && promptLen(history) + (system[0]?.content.length ?? 0) > maxInputChars) {
+    history = history.slice(1);
+  }
+
+  return [...system, ...history];
+}
 
 function buildMessages(
   history: Array<{ role: string; content: string }>,

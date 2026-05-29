@@ -78,6 +78,7 @@ async function transcribe(audio: Float32Array) {
     return;
   }
   if (isTranscribing) {
+    console.warn("[WhisperWorker] dropped audio — transcription already in progress");
     post({ type: "error", message: "Transcription already in progress. Please wait." });
     return;
   }
@@ -86,16 +87,27 @@ async function transcribe(audio: Float32Array) {
   try {
     // Whisper expects 16 kHz mono float32 PCM.
     // chunk_length_s=30 handles recordings up to 30 s; stride handles overlap.
+    let maxAbs = 0, sumAbs = 0;
+    for (let i = 0; i < audio.length; i++) {
+      const a = Math.abs(audio[i]);
+      sumAbs += a;
+      if (a > maxAbs) maxAbs = a;
+    }
+    const meanAbs = sumAbs / audio.length;
+    console.log("[WhisperWorker] transcribing", audio.length, "samples (~" + (audio.length / 16000).toFixed(1) + "s) maxAbs:", maxAbs.toFixed(6), "meanAbs:", meanAbs.toFixed(6));
     const result = await transcriber(audio, {
       sampling_rate: 16000,
-      chunk_length_s: 30,
-      stride_length_s: 5,
       language: loadedLanguage,
       task: "transcribe",
+      // Disable Whisper's internal no-speech gate so short/quiet clips still transcribe.
+      // Without this, Whisper returns {"text":""} when it classifies audio as non-speech.
+      no_speech_threshold: 1.0,
     });
+    console.log("[WhisperWorker] raw result:", JSON.stringify(result));
     const text: string = Array.isArray(result)
       ? result.map((r: { text: string }) => r.text).join(" ").trim()
       : (result as { text: string }).text.trim();
+    console.log("[WhisperWorker] final text:", JSON.stringify(text));
     post({ type: "result", text });
     post({ type: "status", status: "ready" });
   } catch (err) {

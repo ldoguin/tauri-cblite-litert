@@ -117,6 +117,15 @@ export function executeQuery(
   });
 }
 
+/** Create (or idempotently ensure) a full-text search index on a collection field. */
+export function createFtsIndex(
+  collection: string,
+  indexName: string,
+  field: string
+): Promise<void> {
+  return invoke("plugin:cblite|create_fts_index", { collection, indexName, field });
+}
+
 /**
  * Register a predictive model for use in PREDICTION() queries.
  */

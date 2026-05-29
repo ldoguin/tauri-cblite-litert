@@ -7,12 +7,26 @@
  *   3. We parse, execute, and inject <tool_result> blocks.
  *   4. LLM generates a final answer with the results in context.
  *
- * Built-in tools (all offline-capable except web_search):
- *   - date_time    : current date, time, timezone — always available
- *   - calculator   : safe arithmetic expression evaluator — always available
- *   - wikipedia    : Wikipedia article summary — requires network
- *   - web_search   : DuckDuckGo Instant Answer API — requires network
- *                    (no API key needed; uses the public JSON endpoint)
+ * Static tools (registered in ALL_TOOLS):
+ *   - date_time         : current date, time, timezone
+ *   - calculator        : safe arithmetic expression evaluator
+ *   - wikipedia         : Wikipedia article summary (network)
+ *   - fetch_url         : fetch any URL (network, Tauri only)
+ *   - weather           : Open-Meteo forecast (network)
+ *   - exchange_rates    : ECB/Frankfurter FX rates (network)
+ *   - hacker_news       : HN stories and items (network)
+ *   - unit_converter    : unit of measurement conversion
+ *   - date_diff         : difference between two dates
+ *   - text_stats        : word/char/reading-time stats
+ *   - base64            : encode/decode Base64
+ *   - json_query        : query a JSON value by dot-path
+ *   - notes             : in-session note storage
+ *
+ * Dynamic tools (factory functions, registered in useChat):
+ *   - knowledge_search  : semantic RAG search (needs embed engine)
+ *   - web_search        : SearXNG / DuckDuckGo (needs searxngUrl config)
+ *   - list_knowledge_pdfs / get_pdf_page / view_pdf_page  : PDF tools
+ *   - list_knowledge_sources / read_source_chunks / search_knowledge_text : source tools
  */
 
 // ── Tool definition ────────────────────────────────────────────────────────
@@ -191,84 +205,216 @@ const calculatorTool: Tool = {
 const wikipediaTool: Tool = {
   id: "wikipedia",
   name: "Wikipedia",
-  description: "Fetches a short summary of a Wikipedia article by title.",
+  description:
+    "Fetches a short summary of a Wikipedia article by title. " +
+    "Supports any Wikipedia language edition. Use the 'language' parameter when the topic " +
+    "is more likely to have an article in a language other than English (e.g. 'fr' for French topics).",
   requiresNetwork: true,
   params: [
     { name: "query", type: "string", description: "The topic or article title to look up", required: true },
+    { name: "language", type: "string", description: "Wikipedia language code, e.g. 'en' (default), 'fr', 'de', 'es', 'it'", required: false },
   ],
-  async run({ query }, signal) {
+  async run({ query, language }, signal) {
     if (!query) return "Error: query is required";
+    const lang = (typeof language === "string" && language.trim()) ? language.trim() : "en";
+    const q = String(query);
     try {
-      const url = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(String(query))}`;
-      const res = await fetch(url, { headers: { "Accept": "application/json" }, signal });
-      if (!res.ok) return `Wikipedia returned ${res.status} for "${query}"`;
-      const data = await res.json() as { extract?: string; title?: string; type?: string };
+      // Try direct title lookup first.
+      let body: string;
+      try {
+        const url = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(q)}`;
+        body = await tauriFetch(url, signal);
+      } catch {
+        // Direct lookup failed (e.g. 404) — fall back to Wikipedia search API to
+        // find the closest matching article title, then retry the summary endpoint.
+        const searchUrl =
+          `https://${lang}.wikipedia.org/w/api.php?action=query&list=search` +
+          `&srsearch=${encodeURIComponent(q)}&format=json&origin=*&srlimit=1`;
+        const searchBody = await tauriFetch(searchUrl, signal);
+        const searchData = JSON.parse(searchBody) as {
+          query?: { search?: Array<{ title: string }> };
+        };
+        const firstResult = searchData.query?.search?.[0];
+        if (!firstResult) return `No Wikipedia article found for "${q}" (language: ${lang}).`;
+        const retryUrl = `https://${lang}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(firstResult.title)}`;
+        body = await tauriFetch(retryUrl, signal);
+      }
+      const data = JSON.parse(body) as { extract?: string; title?: string; type?: string };
       if (data.type === "disambiguation") {
-        return `"${query}" is a disambiguation page. Try a more specific title.`;
+        return `"${q}" is a disambiguation page. Try a more specific title.`;
       }
       return data.extract
         ? `**${data.title}**\n\n${data.extract}`
-        : `No summary found for "${query}"`;
+        : `No summary found for "${q}"`;
     } catch (e) {
       return `Error fetching Wikipedia: ${String(e)}`;
     }
   },
 };
 
-const webSearchTool: Tool = {
-  id: "web_search",
-  name: "Web Search",
-  description: "Searches the web using DuckDuckGo and returns the top results. No API key required.",
-  requiresNetwork: true,
-  params: [
-    { name: "query", type: "string", description: "The search query", required: true },
-    { name: "max_results", type: "number", description: "Maximum number of results to return (default 5)", required: false },
-  ],
-  async run({ query, max_results }, signal) {
-    if (!query) return "Error: query is required";
-    const limit = typeof max_results === "number" ? Math.min(max_results, 10) : 5;
-    try {
-      // DuckDuckGo Instant Answer API — no key required.
-      // Only registered in ALL_TOOLS on Tauri where CORS is not a constraint.
-      const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(String(query))}&format=json&no_redirect=1&no_html=1&skip_disambig=1`;
-      const res = await fetch(url, { signal });
-      if (!res.ok) return `Search failed: HTTP ${res.status}`;
-      const data = await res.json() as {
-        AbstractText?: string;
-        AbstractURL?: string;
-        AbstractSource?: string;
-        RelatedTopics?: Array<{ Text?: string; FirstURL?: string; Topics?: Array<{ Text?: string; FirstURL?: string }> }>;
-        Answer?: string;
+/**
+ * Fetch the searx.space instance list, rank candidates by reported latency,
+ * then probe the top ones with a real JSON search request to verify that
+ * `format=json` is enabled and the instance isn't rate-limiting us.
+ * Returns the URL of the first instance that responds successfully.
+ */
+export async function pickBestSearxInstance(): Promise<string> {
+  const body = await tauriFetch("https://searx.space/data/instances.json");
+  const data = JSON.parse(body) as {
+    instances: Record<string, {
+      network_type?: string;
+      http?: { status_code?: number };
+      engines?: Record<string, { error_rate?: number | null }>;
+      timing?: {
+        search?: {
+          success_percentage?: number;
+          all?: { median?: number };
+        };
       };
+    }>;
+  };
 
-      const lines: string[] = [];
+  const candidates: Array<{ url: string; median: number }> = [];
+  for (const [url, info] of Object.entries(data.instances)) {
+    if (info.network_type !== "normal") continue;
+    if (info.http?.status_code !== 200) continue;
+    // Must have Google engine enabled with 0% error rate
+    const googleEngine = info.engines?.google;
+    if (!googleEngine || (googleEngine.error_rate ?? 100) !== 0) continue;
+    const search = info.timing?.search;
+    const sp = search?.success_percentage ?? 0;
+    if (sp < 80) continue;
+    const median = search?.all?.median;
+    if (typeof median !== "number" || median >= 2.0) continue;
+    candidates.push({ url: url.replace(/\/$/, ""), median });
+  }
 
-      if (data.Answer) lines.push(`Answer: ${data.Answer}`);
+  if (candidates.length === 0) throw new Error("No healthy SearXNG instances found.");
+  candidates.sort((a, b) => a.median - b.median);
 
-      if (data.AbstractText) {
-        lines.push(`Summary (${data.AbstractSource}): ${data.AbstractText}`);
-        if (data.AbstractURL) lines.push(`Source: ${data.AbstractURL}`);
-      }
-
-      // Flatten related topics
-      const topics = (data.RelatedTopics ?? []).flatMap((t) =>
-        t.Topics ? t.Topics : [t],
-      );
-
-      for (const topic of topics.slice(0, limit)) {
-        if (topic.Text) {
-          lines.push(`• ${topic.Text}${topic.FirstURL ? ` — ${topic.FirstURL}` : ""}`);
-        }
-      }
-
-      return lines.length > 0
-        ? lines.join("\n")
-        : `No results found for "${query}". Try rephrasing.`;
-    } catch (e) {
-      return `Search error: ${String(e)}`;
+  // Probe candidates in order; return the first that actually serves JSON.
+  // Use a short delay between probes to avoid triggering per-IP rate limits.
+  const top = candidates.slice(0, 30);
+  for (const { url } of top) {
+    try {
+      const testUrl = `${url}/search?q=wikipedia&format=json&categories=general&engines=google&language=en-US`;
+      const resp = await tauriFetch(testUrl);
+      const json = JSON.parse(resp) as { results?: unknown[] };
+      if (Array.isArray(json.results)) return url;
+    } catch {
+      // instance unavailable, rate-limited, or JSON disabled — try next
     }
-  },
-};
+    // Small pause to avoid hammering instances and triggering rate limits
+    await new Promise((r) => setTimeout(r, 300));
+  }
+
+  throw new Error(
+    "None of the tested SearXNG instances responded correctly. " +
+    "Try again later, or enter an instance URL manually from https://searx.space/",
+  );
+}
+
+/** SearXNG JSON result shape (subset we care about). */
+interface SearxResult {
+  title?: string;
+  url?: string;
+  content?: string;
+}
+
+async function searchViaSearxng(
+  instanceUrl: string,
+  query: string,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  const base = instanceUrl.replace(/\/$/, "");
+  const url = `${base}/search?q=${encodeURIComponent(query)}&format=json&categories=general&engines=google&language=en-US`;
+  const body = await tauriFetch(url, signal);
+  let data: { results?: SearxResult[] };
+  try {
+    data = JSON.parse(body) as { results?: SearxResult[] };
+  } catch {
+    // Log full response to console for adb logcat diagnosis
+    console.error("[searxng] non-JSON response from", base, ":", body.slice(0, 500));
+    const isHtml = body.trimStart().startsWith("<");
+    const is429 = body.includes("429") || body.toLowerCase().includes("too many");
+    if (is429) throw new Error(`Rate limited by ${base}. Try Auto-pick again in Settings.`);
+    if (isHtml) throw new Error(`${base} returned HTML instead of JSON. format=json may be disabled on this instance. Try Auto-pick again.`);
+    throw new Error(`${base} returned unexpected response. Check adb logcat for details.`);
+  }
+  const results = (data.results ?? []).slice(0, limit);
+  if (results.length === 0) return `No results found for "${query}". Try rephrasing.`;
+  return results
+    .map((r, i) => `[${i + 1}] ${r.title ?? ""}\n${r.content ?? ""}\n${r.url ?? ""}`)
+    .join("\n\n");
+}
+
+async function searchViaDDG(
+  query: string,
+  limit: number,
+  signal?: AbortSignal,
+): Promise<string> {
+  const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
+  const html = await tauriFetch(url, signal);
+
+  if (html.includes("anomaly-modal") || html.includes("bots use DuckDuckGo")) {
+    return "Search unavailable: DuckDuckGo returned a bot challenge. Configure a SearXNG instance in Settings for reliable search.";
+  }
+
+  const titleRe = /<a[^>]+class="result-link"[^>]+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const snippetRe = /<td[^>]+class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
+  const titles: Array<{ title: string; url: string }> = [];
+  let m: RegExpExecArray | null;
+  while ((m = titleRe.exec(html)) !== null) {
+    const href = m[1];
+    const title = m[2].replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&gt;/g, ">").replace(/&lt;/g, "<").trim();
+    let resolvedUrl = href;
+    try {
+      const uddg = new URL("https://lite.duckduckgo.com" + href).searchParams.get("uddg");
+      if (uddg) resolvedUrl = decodeURIComponent(uddg);
+    } catch { /* keep href */ }
+    titles.push({ title, url: resolvedUrl });
+  }
+  const snippets: string[] = [];
+  while ((m = snippetRe.exec(html)) !== null) {
+    snippets.push(m[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
+  }
+
+  const results = titles.slice(0, limit).map((t, i) => ({ ...t, snippet: snippets[i] ?? "" }));
+  if (results.length === 0) return `No results found for "${query}". Try rephrasing.`;
+  return results.map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet}\n${r.url}`).join("\n\n");
+}
+
+/**
+ * Creates a web_search tool wired to a SearXNG instance when configured,
+ * falling back to DuckDuckGo otherwise.
+ */
+export function createWebSearchTool(searxngUrl?: string): Tool {
+  const backend = searxngUrl?.trim() ? `SearXNG (${searxngUrl.trim()})` : "DuckDuckGo";
+  return {
+    id: "web_search",
+    name: "Web Search",
+    description:
+      "Searches the web. Use this for any question about people, " +
+      "current events, recent news, or facts you are unsure about. No API key required.",
+    requiresNetwork: true,
+    params: [
+      { name: "query", type: "string", description: "The search query", required: true },
+      { name: "max_results", type: "number", description: "Maximum number of results to return (default 5)", required: false },
+    ],
+    async run({ query, max_results }, signal) {
+      if (!query) return "Error: query is required";
+      const limit = typeof max_results === "number" ? Math.min(max_results, 10) : 5;
+      try {
+        const instance = searxngUrl?.trim();
+        if (instance) return await searchViaSearxng(instance, String(query), limit, signal);
+        return await searchViaDDG(String(query), limit, signal);
+      } catch (e) {
+        return `Search error (${backend}): ${String(e)}`;
+      }
+    },
+  };
+}
 
 // ── knowledge_search tool (injected deps to avoid circular imports) ─────────
 
@@ -279,7 +425,7 @@ export interface KnowledgeSearchDeps {
     text: string,
     topK: number,
     threshold: number,
-  ) => Promise<Array<{ id: string; source: string; text: string; score: number; type: string }>>;
+  ) => Promise<Array<{ id: string; source: string; text: string; score: number; type: string; pageNumber?: number }>>;
 }
 
 /**
@@ -292,8 +438,9 @@ export function createKnowledgeSearchTool(deps: KnowledgeSearchDeps): Tool {
     id: "knowledge_search",
     name: "Knowledge Search",
     description:
-      "Searches the local knowledge base (uploaded documents and past conversation context) " +
-      "using semantic similarity. Use when the user asks about something that may be in their documents.",
+      "Searches ONLY the user's locally uploaded documents and ingested knowledge. " +
+      "Use ONLY when the user explicitly asks about their own documents, notes, or uploaded files. " +
+      "Do NOT use for general questions, current events, or anything that requires internet access — use web_search for those.",
     requiresNetwork: false,
     params: [
       {
@@ -314,13 +461,51 @@ export function createKnowledgeSearchTool(deps: KnowledgeSearchDeps): Tool {
       const k = typeof top_k === "number" ? Math.min(Math.max(1, top_k), 10) : 3;
       try {
         const vec = await deps.embed(String(query));
-        const results = await deps.retrieveTopK(vec, String(query), k, 0.2);
+        // Retrieve more chunks than requested so page-level aggregation has
+        // enough candidates — a single PDF page can span several chunks.
+        const chunkK = Math.max(k * 6, 18);
+        const results = await deps.retrieveTopK(vec, String(query), chunkK, 0.2);
         if (results.length === 0) return "No relevant content found in the knowledge base.";
-        return results
-          .map((r, i) =>
-            `[${i + 1}] (${r.type}: ${r.source}, score: ${r.score.toFixed(3)})\n${r.text}`,
-          )
-          .join("\n\n");
+
+        // Aggregate PDF chunks by (source, pageNumber): sum scores and
+        // concatenate text so each page appears as a single ranked result.
+        // Non-PDF results (no pageNumber) are kept as-is.
+        type PageEntry = { source: string; pageNumber: number; type: string; texts: string[]; score: number };
+        const pageMap = new Map<string, PageEntry>();
+        const nonPageResults: typeof results = [];
+
+        for (const r of results) {
+          if (r.pageNumber != null) {
+            const key = `${r.source}\0${r.pageNumber}`;
+            const entry = pageMap.get(key);
+            if (entry) {
+              entry.texts.push(r.text);
+              entry.score += r.score;
+            } else {
+              pageMap.set(key, { source: r.source, pageNumber: r.pageNumber, type: r.type, texts: [r.text], score: r.score });
+            }
+          } else {
+            nonPageResults.push(r);
+          }
+        }
+
+        // Sort aggregated pages by total score descending, take top-k
+        const pageResults = Array.from(pageMap.values())
+          .sort((a, b) => b.score - a.score)
+          .slice(0, k);
+
+        const formatted: string[] = [];
+        let idx = 1;
+        for (const p of pageResults) {
+          formatted.push(
+            `[${idx++}] (${p.type}: ${p.source} page ${p.pageNumber}, agg-score: ${p.score.toFixed(3)})\n${p.texts.join(" [...] ")}`,
+          );
+        }
+        // Fill remaining slots with non-page results
+        for (const r of nonPageResults.slice(0, k - pageResults.length)) {
+          formatted.push(`[${idx++}] (${r.type}: ${r.source}, score: ${r.score.toFixed(3)})\n${r.text}`);
+        }
+        return formatted.join("\n\n");
       } catch (e) {
         return `Knowledge search error: ${String(e)}`;
       }
@@ -328,22 +513,190 @@ export function createKnowledgeSearchTool(deps: KnowledgeSearchDeps): Tool {
   };
 }
 
+// ── Skill imports ──────────────────────────────────────────────────────────
+
+import { unitConverterTool } from "./skills/unit-converter";
+import { dateDiffTool }       from "./skills/date-diff";
+import { textStatsTool }      from "./skills/text-stats";
+import { base64Tool }         from "./skills/base64";
+import { jsonQueryTool }      from "./skills/json-query";
+import { notesTool }          from "./skills/notes";
+import { fetchUrlTool }       from "./skills/fetch-url";
+import { weatherTool }        from "./skills/weather";
+import { exchangeRatesTool }  from "./skills/exchange-rates";
+import { hackerNewsTool }     from "./skills/hacker-news";
+
+export { createSourceTools } from "./skills/source-tools";
+export type { SourceToolDeps } from "./skills/source-tools";
+
 // ── Registry ───────────────────────────────────────────────────────────────
 
 function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-// web_search is excluded on web builds — the DuckDuckGo API is blocked by
-// browser CORS policy. Exposing it would cause every call to return an error
-// string to the LLM, wasting context and confusing the model.
-// knowledge_search is not in ALL_TOOLS because it requires injected deps;
-// it is created and added dynamically in useChat after embedding is ready.
+/**
+ * On Tauri: fetch via the Rust `fetch_url` command (bypasses WebView CORS).
+ * On web: plain fetch with the provided signal.
+ */
+async function tauriFetch(url: string, signal?: AbortSignal): Promise<string> {
+  if (isTauri()) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return invoke<string>("fetch_url", { url });
+  }
+  const res = await fetch(url, { signal });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+// ── PDF tools (injected deps to avoid circular imports) ────────────────────
+
+export interface PdfToolDeps {
+  /** Return all knowledge chunks currently in memory. */
+  getChunks: () => import("../lib/types").KnowledgeChunk[];
+  /** Look up the on-disk path for a PDF by filename (null if not stored). */
+  getPdfPath: (filename: string) => Promise<string | null>;
+  /** Read a PDF file from disk and return its bytes as an ArrayBuffer. */
+  readPdfBytes: (path: string) => Promise<ArrayBuffer>;
+  /** Render a single PDF page to a JPEG data URL using pdf.js. */
+  renderPdfPage: (buffer: ArrayBuffer, page: number) => Promise<string>;
+  /** Extract text from a single PDF page. */
+  extractPdfPageText: (buffer: ArrayBuffer, pageNum: number) => Promise<{ text: string; totalPages: number }>;
+}
+
+/**
+ * Creates three PDF tools wired to the active PDF store + knowledge base.
+ * Returned tools:
+ *   - list_knowledge_pdfs  : lists PDF sources in the knowledge base
+ *   - get_pdf_page         : extracts text from a specific page
+ *   - view_pdf_page        : renders a page inline using pdf.js (returns JPEG data URL)
+ */
+export function createPdfTools(deps: PdfToolDeps): Tool[] {
+  const listPdfsTool: Tool = {
+    id: "list_knowledge_pdfs",
+    name: "List Knowledge PDFs",
+    description:
+      "Lists all PDF files that have been ingested into the knowledge base. " +
+      "Call this first to discover available filenames before using other PDF tools.",
+    requiresNetwork: false,
+    params: [],
+    async run() {
+      const chunks = deps.getChunks();
+      const pdfs = [...new Set(
+        chunks
+          .map((c) => c.source)
+          .filter((s) => s.toLowerCase().endsWith(".pdf")),
+      )].sort();
+      if (pdfs.length === 0) return "No PDF files found in the knowledge base.";
+      return pdfs.join("\n");
+    },
+  };
+
+  const getPdfPageTool: Tool = {
+    id: "get_pdf_page",
+    name: "Get PDF Page Text",
+    description:
+      "Extracts the text from a specific page of a PDF that was ingested into the " +
+      "knowledge base. Use list_knowledge_pdfs first to find the correct filename.",
+    requiresNetwork: false,
+    params: [
+      {
+        name: "filename",
+        type: "string",
+        description: "PDF filename exactly as returned by list_knowledge_pdfs",
+        required: true,
+      },
+      {
+        name: "page",
+        type: "number",
+        description: "Page number (1-based)",
+        required: true,
+      },
+    ],
+    async run({ filename, page }) {
+      if (!filename) return "Error: filename is required";
+      const path = await deps.getPdfPath(String(filename));
+      if (!path) {
+        return `PDF "${filename}" is not in the local store. ` +
+          "Re-ingest the file via the Knowledge panel so its pages become accessible.";
+      }
+      try {
+        const buffer = await deps.readPdfBytes(path);
+        const { text, totalPages } = await deps.extractPdfPageText(buffer, Number(page));
+        if (!text) return `Page ${page} of "${filename}" appears to be empty (no extractable text).`;
+        return `[${filename} — page ${page} of ${totalPages}]\n\n${text}`;
+      } catch (e) {
+        return `Error reading page: ${String(e)}`;
+      }
+    },
+  };
+
+  const viewPdfPageTool: Tool = {
+    id: "view_pdf_page",
+    name: "View PDF Page",
+    description:
+      "Renders a specific page of a PDF inline using pdf.js and displays it in the chat. " +
+      "Use this when the user wants to see a page visually, or when knowledge_search " +
+      "returns a result with a page number and you want to show that page. " +
+      "Use list_knowledge_pdfs to find the filename first.",
+    requiresNetwork: false,
+    params: [
+      {
+        name: "filename",
+        type: "string",
+        description: "PDF filename exactly as returned by list_knowledge_pdfs",
+        required: true,
+      },
+      {
+        name: "page",
+        type: "number",
+        description: "1-based page number to render",
+        required: true,
+      },
+    ],
+    async run({ filename, page }) {
+      if (!filename) return "Error: filename is required";
+      const path = await deps.getPdfPath(String(filename));
+      if (!path) {
+        return `PDF "${filename}" is not in the local store. ` +
+          "Re-ingest the file via the Knowledge panel so its pages become accessible.";
+      }
+      try {
+        const buffer = await deps.readPdfBytes(path);
+        // Returns a JPEG data URL — executeToolCalls intercepts it to store the
+        // image separately and send a short summary to the LLM context instead.
+        return await deps.renderPdfPage(buffer, Number(page));
+      } catch (e) {
+        return `Error rendering page: ${String(e)}`;
+      }
+    },
+  };
+
+  return [listPdfsTool, getPdfPageTool, viewPdfPageTool];
+}
+
+// ── Registry ───────────────────────────────────────────────────────────────
+
+// knowledge_search, web_search, PDF tools, and source tools are created dynamically
+// in useChat (they need injected deps or runtime config).
+// fetch_url is Tauri-only (arbitrary URLs — no CORS on web).
 export const ALL_TOOLS: Tool[] = [
+  // Always-available offline tools
   dateTimeTool,
   calculatorTool,
+  unitConverterTool,
+  dateDiffTool,
+  textStatsTool,
+  base64Tool,
+  jsonQueryTool,
+  notesTool,
+  // Network tools — CORS-friendly public APIs (work in both Tauri and web)
   wikipediaTool,
-  ...(isTauri() ? [webSearchTool] : []),
+  weatherTool,
+  exchangeRatesTool,
+  hackerNewsTool,
+  // Network tools — Tauri only (need Rust fetch_url to bypass CORS)
+  ...(isTauri() ? [fetchUrlTool, createWebSearchTool()] : []),
 ];
 
 export function getToolById(id: string): Tool | undefined {
@@ -427,6 +780,8 @@ export interface ToolExecution {
   call: ToolCall;
   result: string;
   durationMs: number;
+  /** Rendered PDF page data URL — set by view_pdf_page; displayed inline below result text */
+  imageDataUrl?: string;
 }
 
 let _execCounter = 0;
@@ -470,7 +825,20 @@ export async function executeToolCalls(
         clearTimeout(timeoutId);
       }
     }
-    executions.push({ id: `${call.tool}-${++_execCounter}`, call, result, durationMs: performance.now() - t0 });
+    // view_pdf_page returns a JPEG data URL. Store it in imageDataUrl and
+    // send a concise text summary to the LLM context instead of the raw data URL.
+    let imageDataUrl: string | undefined;
+    if (call.tool === "view_pdf_page" && result.startsWith("data:image/")) {
+      imageDataUrl = result;
+      result = `Page ${call.args.page ?? "?"} of "${call.args.filename ?? "?"}" rendered and displayed inline.`;
+    }
+    executions.push({
+      id: `${call.tool}-${++_execCounter}`,
+      call,
+      result,
+      durationMs: performance.now() - t0,
+      imageDataUrl,
+    });
   }
 
   const contextBlock = executions

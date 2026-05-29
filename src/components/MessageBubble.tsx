@@ -4,6 +4,7 @@ import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
 import type { Message } from "../lib/types";
 import { loadImageFromBlob, isBlobRef } from "../lib/db";
+import type { ToolExecution } from "../lib/tools";
 
 // ── Code block with copy button ────────────────────────────────────────────
 
@@ -93,8 +94,8 @@ export function MessageBubble({ message, onEdit, onBranch, onBookmark, onFetchRa
   const [ragLoading, setRagLoading] = useState(false);
   const [imageModalOpen, setImageModalOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
-  const isMountedRef = useRef(true);
-  useEffect(() => () => { isMountedRef.current = false; }, []);
+  const isMountedRef = useRef(false);
+  useEffect(() => { isMountedRef.current = true; return () => { isMountedRef.current = false; }; }, []);
 
   // Track whether blob resolution failed so we can show an error instead of
   // spinning forever when the blob is unavailable (deleted or web context).
@@ -348,6 +349,7 @@ export function StreamingBubble({
   tokensPerSec,
   maxTokens,
   tokensGenerated,
+  toolExecutions = [],
 }: {
   content: string;
   tokensPerSec?: number;
@@ -355,6 +357,7 @@ export function StreamingBubble({
   maxTokens?: number;
   /** Tokens generated so far */
   tokensGenerated?: number;
+  toolExecutions?: ToolExecution[];
 }) {
   // Estimate seconds remaining: (maxTokens - generated) / tokensPerSec
   let etaLabel: string | null = null;
@@ -372,6 +375,25 @@ export function StreamingBubble({
     <div className="bubble-row assistant">
       <div className="bubble-avatar">🤖</div>
       <div className="bubble streaming">
+        {toolExecutions.length > 0 && (
+          <ul className="tool-executions">
+            {toolExecutions.map((ex) => {
+              const argSummary = Object.values(ex.call.args)
+                .map((v) => String(v).slice(0, 40))
+                .join(", ");
+              const resultPreview = ex.result.slice(0, 80) + (ex.result.length > 80 ? "…" : "");
+              return (
+                <li key={ex.id} className="tool-execution-item">
+                  <span className="tool-exec-name">🔧 {ex.call.tool}</span>
+                  {argSummary && <span className="tool-exec-args">({argSummary})</span>}
+                  <span className="tool-exec-arrow">→</span>
+                  <span className="tool-exec-result">{resultPreview}</span>
+                  <span className="tool-exec-ms">{ex.durationMs}ms</span>
+                </li>
+              );
+            })}
+          </ul>
+        )}
         <div className="bubble-content">
           <MarkdownContent content={content || " "} />
         </div>

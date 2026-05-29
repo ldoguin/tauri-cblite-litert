@@ -1,18 +1,36 @@
 import { useEffect, useRef, useState } from "react";
 import type { ModelConfig } from "../lib/types";
 import { isTauri } from "../lib/llm";
+import { pickBestSearxInstance } from "../lib/tools";
 
 interface Props {
   config: ModelConfig;
   onSave: (config: ModelConfig) => Promise<void>;
   onClose: () => void;
+  /** When true, renders inline (no overlay/modal wrapper). onClose becomes a no-op. */
+  embedded?: boolean;
 }
 
-export function SettingsPanel({ config, onSave, onClose }: Props) {
+export function SettingsPanel({ config, onSave, onClose, embedded }: Props) {
   const [draft, setDraft] = useState<ModelConfig>({ ...config });
   const [saving, setSaving] = useState(false);
-  const isMountedRef = useRef(true);
-  useEffect(() => () => { isMountedRef.current = false; }, []);
+  const [pickingInstance, setPickingInstance] = useState(false);
+  const [pickError, setPickError] = useState<string | null>(null);
+  const isMountedRef = useRef(false);
+  useEffect(() => { isMountedRef.current = true; return () => { isMountedRef.current = false; }; }, []);
+
+  const handleAutoPickSearx = async () => {
+    setPickingInstance(true);
+    setPickError(null);
+    try {
+      const url = await pickBestSearxInstance();
+      if (isMountedRef.current) set("searxngUrl", url);
+    } catch (e) {
+      if (isMountedRef.current) setPickError(String(e));
+    } finally {
+      if (isMountedRef.current) setPickingInstance(false);
+    }
+  };
 
   const set = <K extends keyof ModelConfig>(key: K, value: ModelConfig[K]) =>
     setDraft((prev) => ({ ...prev, [key]: value }));
@@ -27,17 +45,16 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
     }
   };
 
-  return (
-    <div className="panel-overlay" onClick={onClose}>
-      <div className="panel" onClick={(e) => e.stopPropagation()}>
-        <div className="panel-header">
-          <h2>⚙️ Settings</h2>
+  const inner = (
+    <div className={embedded ? "panel embedded-panel" : "panel"} onClick={embedded ? undefined : (e) => e.stopPropagation()}>
+      <div className="panel-header">
+        <h2>⚙️ Settings</h2>
           <button className="icon-btn" onClick={onClose}>✕</button>
         </div>
 
         <div className="panel-body">
           {/* Model paths */}
-          <section className="panel-section">
+          <section id="settings-models" className="panel-section">
             <h3>Models</h3>
 
             {isTauri() && (
@@ -136,7 +153,7 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
           </section>
 
           {/* Generation parameters */}
-          <section className="panel-section">
+          <section id="settings-generation" className="panel-section">
             <h3>Generation</h3>
 
             <label className="field-label">
@@ -162,7 +179,7 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
             <input
               type="range"
               min={64}
-              max={4096}
+              max={8192}
               step={64}
               value={draft.maxTokens}
               onChange={(e) => set("maxTokens", Number(e.target.value))}
@@ -286,7 +303,7 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
           </section>
 
           {!isTauri() && (
-            <section className="panel-section">
+            <section id="settings-web-search" className="panel-section">
               <h3>Web backends</h3>
               <p className="hint">
                 Use the toolbar to configure the LLM backend (on-device via
@@ -295,64 +312,67 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
             </section>
           )}
 
+          {/* ── Web search ── */}
+          {isTauri() && (
+            <section id="settings-web-search" className="panel-section">
+              <h3>Web search</h3>
+              <p className="hint">
+                SearXNG is an open-source meta-search engine with no API key required.
+                Enter the URL of any public or self-hosted instance.{" "}
+                <a href="https://searx.space/" target="_blank" rel="noreferrer">Browse instances</a>.
+                Leave empty to use DuckDuckGo (may be unreliable on some networks).
+              </p>
+              <label className="field-label">SearXNG instance URL</label>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  className="field-input"
+                  placeholder="https://searx.be"
+                  value={draft.searxngUrl ?? ""}
+                  onChange={(e) => set("searxngUrl", e.target.value.trim())}
+                  style={{ flex: 1 }}
+                />
+                <button
+                  className="btn-secondary"
+                  onClick={handleAutoPickSearx}
+                  disabled={pickingInstance}
+                  style={{ whiteSpace: "nowrap" }}
+                >
+                  {pickingInstance ? "Picking…" : "Auto-pick"}
+                </button>
+              </div>
+              {pickError && <p className="hint" style={{ color: "var(--error)" }}>{pickError}</p>}
+            </section>
+          )}
+
           {/* ── Wake word ── */}
-          <section className="panel-section">
+          <section id="settings-wake-word" className="panel-section">
             <h3>Wake word</h3>
             <p className="hint">
-              Porcupine listens for a keyword and automatically starts voice
-              recording. Requires a free{" "}
-              <a href="https://console.picovoice.ai/" target="_blank" rel="noreferrer">
-                Picovoice AccessKey
-              </a>
-              . Inference runs entirely on-device after the first load.
+              Say this phrase to automatically start voice recording. Detected
+              locally using Whisper — no API key needed.
             </p>
 
-            <label className="field-label">Picovoice AccessKey</label>
+            <label className="field-label">Wake phrase</label>
             <input
               className="field-input"
-              type="password"
-              autoComplete="off"
-              placeholder="Paste your AccessKey here"
-              value={draft.porcupineAccessKey ?? ""}
-              onChange={(e) => set("porcupineAccessKey", e.target.value)}
-            />
-
-            <label className="field-label" style={{ marginTop: 12 }}>Keyword</label>
-            <select
-              className="field-input"
-              value={draft.porcupineKeyword ?? "Jarvis"}
-              onChange={(e) => set("porcupineKeyword", e.target.value)}
-            >
-              {[
-                "Alexa", "Americano", "Blueberry", "Bumblebee", "Computer",
-                "Grapefruit", "Grasshopper", "Hey Google", "Hey Siri", "Jarvis",
-                "Ok Google", "Picovoice", "Porcupine", "Terminator",
-              ].map((kw) => (
-                <option key={kw} value={kw}>{kw}</option>
-              ))}
-            </select>
-
-            <label className="field-label" style={{ marginTop: 12 }}>
-              Sensitivity: {(draft.porcupineSensitivity ?? 0.5).toFixed(2)}
-            </label>
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={draft.porcupineSensitivity ?? 0.5}
-              onChange={(e) => set("porcupineSensitivity", Number(e.target.value))}
+              type="text"
+              placeholder="e.g. jarvis, hey computer"
+              value={draft.wakePhrase ?? "jarvis"}
+              onChange={(e) => set("wakePhrase", e.target.value)}
             />
             <p className="hint">
-              Higher sensitivity = fewer missed detections, more false positives.
+              Leave empty to disable wake word detection. The phrase is matched
+              case-insensitively against the Whisper transcript.
             </p>
           </section>
         </div>
 
         <div className="panel-footer">
-          <button className="btn-secondary" onClick={onClose}>
-            Cancel
-          </button>
+          {!embedded && (
+            <button className="btn-secondary" onClick={onClose}>
+              Cancel
+            </button>
+          )}
           <button
             className="btn-primary"
             onClick={handleSave}
@@ -362,6 +382,8 @@ export function SettingsPanel({ config, onSave, onClose }: Props) {
           </button>
         </div>
       </div>
-    </div>
   );
+
+  if (embedded) return inner;
+  return <div className="panel-overlay" onClick={onClose}>{inner}</div>;
 }

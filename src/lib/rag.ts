@@ -185,6 +185,7 @@ async function embedWithLiteRtPlugin(text: string, modelId: string): Promise<num
   const { outputs } = await runInference({
     modelId,
     inputs: [input_word_ids, input_mask, input_type_ids],
+    inputTypes: ["int32", "int32", "int32"],
   });
   // First output tensor is the embedding vector
   return l2Normalise(outputs[0] ?? []);
@@ -456,6 +457,10 @@ export interface RetrievedChunk {
   type: RetrievedItemType;
   /** Conversation the message belongs to, if type === "message" */
   conversationId?: string;
+  /** CBL blob ref or data URL for image knowledge chunks */
+  imageRef?: string;
+  /** 1-based PDF page number this chunk was extracted from */
+  pageNumber?: number;
 }
 
 // ── BM25 ───────────────────────────────────────────────────────────────────
@@ -639,7 +644,7 @@ export async function retrieveTopK(
 
   for (const c of chunks) {
     const tf = chunkTf.get(c.id) ?? new Map<string, number>();
-    pool.push({ id: c.id, source: c.source, text: c.text, score: 0, type: "knowledge", tf, len: c.text.length });
+    pool.push({ id: c.id, source: c.source, text: c.text, imageRef: c.imageRef, pageNumber: c.pageNumber, score: 0, type: "knowledge", tf, len: c.text.length });
   }
   for (const m of messages) {
     // Always add to pool so BM25 can score un-embedded messages.
