@@ -12,10 +12,11 @@ declare module "@xenova/transformers" {
     audio: Float32Array,
     opts: {
       sampling_rate: number;
-      chunk_length_s: number;
-      stride_length_s: number;
-      language: string;
-      task: string;
+      chunk_length_s?: number;
+      stride_length_s?: number;
+      language?: string;
+      task?: string;
+      no_speech_threshold?: number;
     },
   ) => Promise<{ text: string } | Array<{ text: string }>>;
 

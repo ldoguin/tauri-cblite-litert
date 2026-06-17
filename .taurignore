@@ -1,0 +1,3 @@
+# Prevent tauri dev from reloading when large model files change
+models/
+vendor/

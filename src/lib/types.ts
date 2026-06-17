@@ -119,6 +119,8 @@ export interface ModelConfig {
   whisperModelId: string;
   /** Wake phrase matched against Whisper transcript (e.g. "jarvis"). Empty = disabled. */
   wakePhrase: string;
+  /** HuggingFace model ID for TTS synthesis. Defaults to Xenova/mms-tts-eng when empty. */
+  ttsModelId: string;
   /** Characters per chunk when splitting documents for embedding (default 400) */
   chunkSize: number;
   /** Overlap between consecutive chunks in characters (default 80) */
@@ -146,6 +148,7 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   activeAgentId: null,
   whisperModelId: "",
   wakePhrase: "jarvis",
+  ttsModelId: "",
   temperature: 0.8,
   topP: 0.95,
   topK: 40,
@@ -155,6 +158,31 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   hybridBm25Weight: 0.3,
   searxngUrl: "",
 };
+
+export interface Product {
+  id: string;
+  name: string;
+  description: string;
+  category: string;
+  price?: number;
+  /** CBL blob ref or data URL for the product image */
+  imageRef?: string;
+  /** 32×32 JPEG base64 thumbnail — stored directly in the document for instant blur-up */
+  thumb?: string;
+  /** BERT/BoW embedding for vector search (in-session only; not returned by listProducts) */
+  embedding?: number[];
+  /** True when an embedding has been persisted for this product */
+  hasEmbedding?: boolean;
+  /** BERT embedding of LLM-generated image description — used for image-query vector search */
+  imageEmbedding?: number[];
+  /** True when an imageEmbedding has been persisted for this product */
+  hasImageEmbedding?: boolean;
+  /** LLM-generated textual description of the product image */
+  imageDescription?: string;
+  /** Inferred gender audience: Men | Women | Kids | Unisex */
+  gender?: string;
+  createdAt: string;
+}
 
 export type AppStatus =
   | "idle"

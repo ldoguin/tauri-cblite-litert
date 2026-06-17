@@ -14,6 +14,7 @@ import type {
   KnowledgeChunk,
   ModelConfig,
   Agent,
+  Product,
 } from "./types";
 import { DEFAULT_MODEL_CONFIG } from "./types";
 
@@ -27,6 +28,7 @@ const COL_KNOWLEDGE     = "_default.knowledge";
 const COL_CONFIG        = "_default.config";
 const COL_AGENTS        = "_default.agents";
 const COL_PDFS          = "_default.pdfs";
+const COL_PRODUCTS      = "_default.products";
 
 // ── Blob storage ───────────────────────────────────────────────────────────
 //
@@ -84,6 +86,21 @@ export function isBlobRef(value: string): boolean {
   return value.startsWith(CBL_BLOB_PREFIX);
 }
 
+// ── Init progress events ───────────────────────────────────────────────────
+//
+// Dispatched on window so the splash screen can display progress without
+// needing a direct reference to db internals. Useful on Android where
+// DevTools is unavailable.
+
+export const DB_PROGRESS_EVENT = "rag-chatbot:db-progress";
+
+export function dispatchDbProgress(message: string): void {
+  console.log("[db]", message);
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent(DB_PROGRESS_EVENT, { detail: { message } }));
+  }
+}
+
 // ── RAG pool version counter ───────────────────────────────────────────────
 //
 // Incremented whenever knowledge chunks or embedded messages are written or
@@ -99,8 +116,27 @@ export function bumpRagPoolVersion(): void { _ragPoolVersion++; }
 // Increment DB_SCHEMA_VERSION whenever a breaking schema change is made.
 // runMigrations() applies any pending migrations in order on every startup.
 
-const DB_SCHEMA_VERSION = 1;
+const DB_SCHEMA_VERSION = 4;
 const SCHEMA_VERSION_DOC = "schema-version";
+
+/** Delete every document in the products collection using a raw ID scan. */
+async function nukeAllProducts(): Promise<number> {
+  if (!isTauri()) {
+    const all = webStore.list(COL_PRODUCTS);
+    for (const p of all) webStore.delete(COL_PRODUCTS, (p as { id: string }).id);
+    return all.length;
+  }
+  const { executeQuery, saveDocument } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id FROM \`_default\`.products`,
+    {},
+  ) as Array<{ id: string }>;
+  if (rows.length > 0) {
+    await Promise.all(rows.map((r) => saveDocument(COL_PRODUCTS, r.id, { __deleted: true })));
+  }
+  return rows.length;
+}
 
 async function runMigrations(): Promise<void> {
   // Read current version (0 = fresh database)
@@ -110,8 +146,6 @@ async function runMigrations(): Promise<void> {
     currentVersion = typeof doc?.version === "number" ? doc.version : 0;
   } else {
     const { getDocument } = await import("tauri-plugin-cblite");
-    // CouchbaseLite returns a "not found" error for missing documents rather
-    // than null — treat it as version 0 (fresh database).
     const doc = await getDocument(COL_CONFIG, SCHEMA_VERSION_DOC)
       .catch((e: unknown) => {
         if (String(e).toLowerCase().includes("not found")) return null;
@@ -120,11 +154,21 @@ async function runMigrations(): Promise<void> {
     currentVersion = doc?.version ?? 0;
   }
 
+  dispatchDbProgress(`DB schema: current v${currentVersion}, target v${DB_SCHEMA_VERSION}`);
+
   if (currentVersion >= DB_SCHEMA_VERSION) return;
 
   // ── Migration v0 → v1 ────────────────────────────────────────────────────
   // Initial schema — nothing to migrate; just stamp the version.
-  // Add future migrations as: if (currentVersion < N) { ... currentVersion = N; }
+
+  // ── Migration v1 → v2 → v3 → v4 ─────────────────────────────────────────
+  // Clear all products so they re-seed with latest schema (blob images, gender field).
+  // If public/embeddings.json exists the seed will re-apply pre-baked vectors automatically.
+  if (currentVersion < 4) {
+    dispatchDbProgress("Migration: clearing all product documents…");
+    const count = await nukeAllProducts();
+    dispatchDbProgress(`Migration: removed ${count} product docs — will re-seed`);
+  }
 
   // Persist the new version
   if (!isTauri()) {
@@ -133,6 +177,18 @@ async function runMigrations(): Promise<void> {
     const { saveDocument } = await import("tauri-plugin-cblite");
     await saveDocument(COL_CONFIG, SCHEMA_VERSION_DOC, { version: DB_SCHEMA_VERSION });
   }
+  dispatchDbProgress(`DB schema updated to v${DB_SCHEMA_VERSION}`);
+}
+
+/**
+ * Force-clear all products and re-seed from products-seed.json.
+ * Called from the UI "Reset catalog" button.
+ */
+export async function resetProductCatalog(): Promise<void> {
+  dispatchDbProgress("Resetting product catalog…");
+  const count = await nukeAllProducts();
+  dispatchDbProgress(`Cleared ${count} products`);
+  await seedProductsIfEmpty();
 }
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
@@ -145,15 +201,32 @@ export async function initDatabase(dbDir: string): Promise<void> {
   }
   const { openDatabase, createFtsIndex } = await import("tauri-plugin-cblite");
   await openDatabase(dbDir, "rag-chatbot", undefined, [
-    COL_CONVERSATIONS, COL_MESSAGES, COL_KNOWLEDGE, COL_CONFIG, COL_AGENTS, COL_PDFS,
+    COL_CONVERSATIONS, COL_MESSAGES, COL_KNOWLEDGE, COL_CONFIG, COL_AGENTS, COL_PDFS, COL_PRODUCTS,
   ]);
-  // Create FTS indexes for full-text search via N1QL MATCH().
-  // Idempotent — safe to call on every startup.
-  await Promise.all([
-    createFtsIndex(COL_KNOWLEDGE, "knowledgeFts", "text"),
-    createFtsIndex(COL_MESSAGES,  "messagesFts",  "content"),
-  ]);
+  // Create FTS indexes. Failures are logged but don't abort init.
+  // Products FTS: index `name` only — CBL Android CE rejects multi-field FullTextIndexConfiguration.
+  const { listIndexes } = await import("tauri-plugin-cblite");
+  for (const [col, name, field] of [
+    [COL_KNOWLEDGE, "knowledgeFts", "text"],
+    [COL_MESSAGES,  "messagesFts",  "content"],
+    [COL_PRODUCTS,  "productsFts",  "name"],
+  ] as Array<[string, string, string]>) {
+    try {
+      await createFtsIndex(col, name, field);
+      dispatchDbProgress(`FTS ${name}: ✓ created`);
+    } catch (e) {
+      dispatchDbProgress(`FTS ${name} FAILED: ${String(e)}`);
+    }
+    // Diagnostic: verify the index exists (separate try so it never masks creation success/failure)
+    try {
+      const existing = await listIndexes(col);
+      if (!existing.includes(name)) {
+        dispatchDbProgress(`FTS ${name}: ✗ NOT FOUND in index list — ${existing.join(", ")}`);
+      }
+    } catch { /* listIndexes not critical */ }
+  }
   await runMigrations();
+  await seedProductsIfEmpty();
 }
 
 export async function shutdownDatabase(): Promise<void> {
@@ -412,8 +485,8 @@ export async function searchKnowledgeText(
   const rows = await executeQuery(
     "N1QL",
     `SELECT META().id AS id, source, text, createdAt, imageRef, pageNumber
-     FROM \`_default\`.knowledge
-     WHERE MATCH(knowledgeFts, $query) AND __deleted IS MISSING
+     FROM _default.knowledge
+     WHERE MATCH(knowledge.knowledgeFts, $query) AND __deleted IS MISSING
      ORDER BY RANK() DESC
      LIMIT ${limit}`,
     { query },
@@ -687,4 +760,320 @@ const webStore = {
 // Flush on page unload so the debounce timer never silently drops writes.
 if (typeof window !== "undefined") {
   window.addEventListener("beforeunload", () => webStore.flush());
+}
+
+// ── Products ───────────────────────────────────────────────────────────────
+
+export async function listProducts(): Promise<Product[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_PRODUCTS) as unknown as Product[])
+      .filter((p) => !(p as unknown as Record<string, unknown>)["__deleted"] && !!(p as unknown as Record<string, unknown>)["name"])
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  // Omit `embedding` — 384 floats per product overflows Tauri IPC for large catalogs.
+  // Use `hasEmbedding` (boolean) to know which products already have a persisted vector.
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, name, description, category, price, imageRef, thumb, hasEmbedding, createdAt
+     FROM \`_default\`.products
+     WHERE __deleted IS MISSING AND name IS NOT MISSING
+     ORDER BY name ASC`,
+    {},
+  );
+  return (rows as Product[]).filter((p) => !!p.name);
+}
+
+/**
+ * Search products using CBL FTS (MATCH) for text, returning up to 50 candidates
+ * ordered by FTS relevance.  Includes the `embedding` field so the caller can
+ * do a cosine re-rank without a second round-trip.
+ *
+ * When query is empty, falls back to listProducts() filtered by category.
+ */
+export async function searchProducts(query: string, category: string): Promise<Product[]> {
+  // Web fallback: simple in-memory filter
+  if (!isTauri()) {
+    const all = await listProducts();
+    const base = category === "All" ? all : all.filter((p) => p.category === category);
+    if (!query.trim()) return base;
+    const lower = query.toLowerCase();
+    return base.filter(
+      (p) =>
+        p.name.toLowerCase().includes(lower) ||
+        p.description.toLowerCase().includes(lower),
+    );
+  }
+
+  // No query → return the catalogue without embeddings (display only)
+  if (!query.trim()) {
+    const all = await listProducts();
+    return category === "All" ? all : all.filter((p) => p.category === category);
+  }
+
+  const { executeQuery } = await import("tauri-plugin-cblite");
+
+  const catClause = category === "All" ? "" : "AND category = $cat";
+  const params: Record<string, unknown> = { query };
+  if (category !== "All") params.cat = category;
+
+  try {
+    // Use unquoted scope name — CBL 4.x MATCH() resolves FTS indexes differently
+    // with backtick-quoted vs unquoted scope identifiers.
+    const rows = await executeQuery(
+      "N1QL",
+      `SELECT META().id AS id, name, description, category, price, imageRef, thumb, hasEmbedding, embedding, createdAt
+       FROM _default.products
+       WHERE MATCH(products.productsFts, $query) AND __deleted IS MISSING ${catClause}
+       LIMIT 50`,
+      params,
+    );
+    return (rows as Product[]).filter((p) => !!p.name);
+  } catch (e) {
+    dispatchDbProgress(`FTS unavailable (${String(e).slice(0, 80)}), using LIKE`);
+    const likeParams: Record<string, unknown> = { pattern: `%${query.toLowerCase()}%` };
+    if (category !== "All") likeParams.cat = category;
+    const rows = await executeQuery(
+      "N1QL",
+      `SELECT META().id AS id, name, description, category, price, imageRef, thumb, hasEmbedding, embedding, createdAt
+       FROM _default.products
+       WHERE __deleted IS MISSING AND name IS NOT MISSING
+         AND (LOWER(name) LIKE $pattern OR LOWER(description) LIKE $pattern)
+         ${catClause}
+       LIMIT 50`,
+      likeParams,
+    );
+    return (rows as Product[]).filter((p) => !!p.name);
+  }
+}
+
+/**
+ * Load all products that have a stored embedding, including the embedding vector.
+ * Used for pure vector search (image search) without a keyword pre-filter.
+ */
+export async function listProductsWithEmbeddings(): Promise<Product[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_PRODUCTS) as unknown as Product[])
+      .filter((p) => p.embedding?.length && !(p as unknown as Record<string, unknown>)["__deleted"]);
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, name, description, category, price, imageRef, thumb, hasEmbedding, embedding, createdAt
+     FROM \`_default\`.products
+     WHERE hasEmbedding = true AND __deleted IS MISSING AND name IS NOT MISSING`,
+    {},
+  );
+  return (rows as Product[]).filter((p) => !!p.name && p.embedding?.length);
+}
+
+/**
+ * Load all products that have a stored imageEmbedding (from LLM image description).
+ * Used for image-to-image vector search — higher cross-modal alignment than text embeddings.
+ */
+export async function listProductsWithImageEmbeddings(): Promise<Product[]> {
+  if (!isTauri()) return [];
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, name, description, category, price, imageRef, thumb, hasImageEmbedding, imageEmbedding, createdAt
+     FROM _default.products
+     WHERE hasImageEmbedding = true AND __deleted IS MISSING AND name IS NOT MISSING`,
+    {},
+  );
+  return (rows as Product[]).filter((p) => !!p.name && p.imageEmbedding?.length);
+}
+
+/**
+ * Returns products that have a thumbnail but no imageEmbedding yet.
+ * Used by the bulk image embedding job.
+ */
+export async function listProductsNeedingImageEmbedding(): Promise<Product[]> {
+  if (!isTauri()) return [];
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, name, description, category, imageRef, createdAt
+     FROM _default.products
+     WHERE __deleted IS MISSING AND name IS NOT MISSING
+       AND imageRef IS NOT MISSING
+       AND (hasImageEmbedding IS MISSING OR hasImageEmbedding = false)
+     LIMIT 500`,
+    {},
+  );
+  return rows as Product[];
+}
+
+/**
+ * Persist an imageEmbedding for a product without touching its other fields.
+ */
+export async function saveProductImageEmbedding(id: string, embedding: number[], description?: string): Promise<void> {
+  if (!isTauri()) return;
+  const { getDocument, saveDocument } = await import("tauri-plugin-cblite");
+  const existing = await getDocument(COL_PRODUCTS, id) as Record<string, unknown> | null;
+  if (!existing) return;
+  await saveDocument(COL_PRODUCTS, id, {
+    ...existing,
+    imageEmbedding: embedding,
+    hasImageEmbedding: true,
+    ...(description ? { imageDescription: description } : {}),
+  });
+}
+
+/** Resolve a product's imageRef to a displayable data URL. */
+export async function getProductImage(id: string): Promise<string | null> {
+  if (!isTauri()) {
+    const doc = webStore.get(COL_PRODUCTS, id);
+    return typeof doc?.imageRef === "string" ? doc.imageRef : null;
+  }
+  try {
+    const { getDocument } = await import("tauri-plugin-cblite");
+    const doc = await getDocument(COL_PRODUCTS, id)
+      .catch((e: unknown) => {
+        if (String(e).toLowerCase().includes("not found")) return null;
+        throw e;
+      }) as { imageRef?: string } | null;
+    if (!doc?.imageRef) {
+      dispatchDbProgress(`[img] no imageRef for ${id}`);
+      return null;
+    }
+    const result = await loadImageFromBlob(doc.imageRef);
+    if (!result) dispatchDbProgress(`[img] blob load failed for ${id} (ref: ${doc.imageRef.slice(0, 40)})`);
+    return result;
+  } catch (e) {
+    dispatchDbProgress(`[img] error for ${id}: ${String(e).slice(0, 80)}`);
+    return null;
+  }
+}
+
+/**
+ * Infer gender audience from product name + description.
+ * Order matters: check "women" before "men" (since "men" is a substring of "women").
+ */
+export function inferGender(name: string, description: string): "Men" | "Women" | "Kids" | "Unisex" {
+  const text = `${name} ${description}`.toLowerCase();
+  if (/\bwom[ae]n\b/.test(text) || /\bfemale\b/.test(text) || /\bladies\b/.test(text)) return "Women";
+  if (/\bgirls?\b/.test(text)) return "Kids";
+  if (/\bmen\b/.test(text) || /\bmale\b/.test(text)) return "Men";
+  if (/\bboys?\b/.test(text) || /\bkids?\b/.test(text) || /\bchildren\b/.test(text)) return "Kids";
+  return "Unisex";
+}
+
+export async function saveProduct(product: Product): Promise<void> {
+  const { id, embedding, ...body } = product;
+  // Convert base64 data URLs to CBL blob attachments so documents stay small.
+  if (body.imageRef?.startsWith("data:")) {
+    body.imageRef = await saveImageAsBlob(body.imageRef);
+  }
+  // Store the embedding array only if provided; mark hasEmbedding for listProducts queries.
+  const docBody: Record<string, unknown> = { ...body };
+  if (embedding && embedding.length > 0) {
+    docBody.embedding = embedding;
+    docBody.hasEmbedding = true;
+  }
+  if (!isTauri()) { webStore.set(COL_PRODUCTS, id, docBody); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_PRODUCTS, id, docBody);
+}
+
+export async function deleteProduct(id: string): Promise<void> {
+  if (!isTauri()) { webStore.delete(COL_PRODUCTS, id); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_PRODUCTS, id, { __deleted: true });
+}
+
+type EmbeddingEntry = { embedding?: number[]; imageEmbedding?: number[]; imageDescription?: string };
+
+/**
+ * Export all product embeddings to a user-accessible file via Rust.
+ * On Android: /sdcard/Android/data/<pkg>/files/embeddings.json (ADB pull from there)
+ * On desktop: ~/Downloads/embeddings.json
+ * Returns the number of products exported.
+ */
+export async function exportProductEmbeddings(): Promise<number> {
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, embedding, imageEmbedding, imageDescription
+     FROM _default.products
+     WHERE __deleted IS MISSING AND name IS NOT MISSING
+       AND (hasEmbedding = true OR hasImageEmbedding = true)`,
+    {},
+  ) as Array<{ id: string; embedding?: number[]; imageEmbedding?: number[]; imageDescription?: string }>;
+
+  const map: Record<string, EmbeddingEntry> = {};
+  for (const row of rows) {
+    const entry: EmbeddingEntry = {};
+    if (row.imageEmbedding?.length) {
+      entry.imageEmbedding = row.imageEmbedding;
+      if (row.imageDescription) entry.imageDescription = row.imageDescription;
+    } else if (row.embedding?.length) {
+      entry.embedding = row.embedding;
+    }
+    if (Object.keys(entry).length) map[row.id] = entry;
+  }
+
+  const { writeExportFile } = await import("tauri-plugin-cblite");
+  const savedPath = await writeExportFile("embeddings.json", JSON.stringify(map));
+  dispatchDbProgress(`Embeddings saved → ${savedPath}`);
+  return Object.keys(map).length;
+}
+
+async function seedProductsIfEmpty(): Promise<void> {
+  const existing = await listProducts();
+  if (existing.length > 0) {
+    dispatchDbProgress(`Product catalog: ${existing.length} items`);
+    return;
+  }
+
+  dispatchDbProgress("Fetching product catalog…");
+  try {
+    const res = await fetch("/products-seed.json");
+    if (!res.ok) {
+      dispatchDbProgress(`Product seed not found (HTTP ${res.status}) — skipping`);
+      return;
+    }
+    const seed = await res.json() as Product[];
+
+    // Pre-baked embeddings: if public/embeddings.json exists, merge them in at seed time
+    // so products start with their vectors and don't need recomputation.
+    let embeddingsMap: Record<string, EmbeddingEntry> = {};
+    try {
+      const er = await fetch("/embeddings.json");
+      if (er.ok) {
+        embeddingsMap = await er.json() as Record<string, EmbeddingEntry>;
+        dispatchDbProgress(`Pre-baked embeddings: ${Object.keys(embeddingsMap).length}`);
+      }
+    } catch { /* embeddings.json optional */ }
+
+    const now   = new Date().toISOString();
+    // Small batch size to avoid overwhelming the Android IPC channel (each product
+    // sends ~40 KB of base64 image data to the native side via saveBlob).
+    const BATCH = 5;
+    const total = seed.length;
+    let saved = 0;
+    let failed = 0;
+    for (let i = 0; i < total; i += BATCH) {
+      const results = await Promise.allSettled(
+        seed.slice(i, i + BATCH).map((p) => {
+          const e = embeddingsMap[p.id];
+          const product: Product = {
+            ...p,
+            createdAt: p.createdAt ?? now,
+            gender: p.gender ?? inferGender(p.name, p.description),
+          };
+          if (e?.embedding?.length)      { product.embedding = e.embedding; }
+          if (e?.imageEmbedding?.length) { product.imageEmbedding = e.imageEmbedding; product.hasImageEmbedding = true; }
+          if (e?.imageDescription)       { product.imageDescription = e.imageDescription; }
+          return saveProduct(product);
+        }),
+      );
+      saved  += results.filter((r) => r.status === "fulfilled").length;
+      failed += results.filter((r) => r.status === "rejected").length;
+      dispatchDbProgress(`Saving products… ${Math.min(i + BATCH, total)}/${total}${failed > 0 ? ` (${failed} errors)` : ""}`);
+    }
+    dispatchDbProgress(`Product catalog ready — ${saved}/${total} saved${failed > 0 ? `, ${failed} failed` : ""}`);
+  } catch (e) {
+    dispatchDbProgress(`Product seed error: ${String(e)}`);
+  }
 }

@@ -138,6 +138,28 @@ export function SettingsPanel({ config, onSave, onClose, embedded }: Props) {
               (~75 MB) for better accuracy.
             </p>
 
+            <label className="field-label" style={{ marginTop: 12 }}>
+              TTS model <span className="field-optional">(text-to-speech)</span>
+            </label>
+            <input
+              className="field-input"
+              placeholder="Xenova/mms-tts-eng"
+              value={draft.ttsModelId ?? ""}
+              onChange={(e) => set("ttsModelId", e.target.value)}
+            />
+            <p className="hint">
+              HuggingFace model ID for on-device speech synthesis. Downloaded
+              once and cached. Default:{" "}
+              <a
+                href="https://huggingface.co/Xenova/mms-tts-eng"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Xenova/mms-tts-eng
+              </a>{" "}
+              (~50 MB).
+            </p>
+
             <label className="field-label">Accelerator</label>
             <select
               className="field-select"

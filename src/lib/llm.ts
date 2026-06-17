@@ -188,6 +188,7 @@ export async function generateOnce(
   systemInstruction: string,
   config: ModelConfig,
   signal?: AbortSignal,
+  imageDataUrl?: string,
 ): Promise<string> {
   let result = "";
   let rejected = false;
@@ -195,7 +196,7 @@ export async function generateOnce(
     generateStream(
       [{ role: "user", content: userText }],
       "",
-      { systemInstruction, config, enabledTools: [], signal },
+      { systemInstruction, config, enabledTools: [], signal, imageDataUrl },
       {
         onChunk: (c) => { result += c; },
         onDone: () => resolve(),

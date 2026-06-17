@@ -309,6 +309,37 @@ async fn open_pdf_page(path: String, page: u32) -> Result<(), String> {
     Ok(())
 }
 
+/// Write a text file to a user-accessible location and return the path.
+/// On Android: /sdcard/Android/data/<pkg>/files/<filename>  (ADB-accessible)
+/// On desktop:  ~/Downloads/<filename>  (falls back to home dir)
+#[tauri::command]
+async fn write_export_file(app: AppHandle, filename: String, data: String) -> Result<String, String> {
+    #[cfg(target_os = "android")]
+    let dest = {
+        let pkg = app.config().identifier.to_string();
+        std::path::PathBuf::from(format!("/sdcard/Android/data/{pkg}/files/{filename}"))
+    };
+    #[cfg(not(target_os = "android"))]
+    let dest = {
+        let dir = app
+            .path()
+            .download_dir()
+            .or_else(|_| app.path().home_dir())
+            .map_err(|e| format!("cannot resolve output dir: {e}"))?;
+        dir.join(&filename)
+    };
+
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| format!("mkdir {}: {e}", parent.display()))?;
+    }
+    tokio::fs::write(&dest, data.as_bytes())
+        .await
+        .map_err(|e| format!("write {}: {e}", dest.display()))?;
+    Ok(dest.to_string_lossy().into_owned())
+}
+
 /// Delete a cached model file from the app local data dir.
 #[tauri::command]
 async fn delete_model_file(app: AppHandle, file_name: String) -> Result<(), String> {
@@ -352,6 +383,7 @@ pub fn run() {
             save_pdf,
             read_pdf_bytes,
             open_pdf_page,
+            write_export_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

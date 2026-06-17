@@ -14,7 +14,11 @@ import { AgentEditorPane } from "./components/AgentEditorPane";
 import { ModelManagerPanel } from "./components/ModelManagerPanel";
 import { SearchPanel } from "./components/SearchPanel";
 import { WebGpuBanner } from "./components/WebGpuBanner";
-import { isTauri, MODEL_PRESETS } from "./lib/llm";
+import { WelcomeScreen } from "./components/WelcomeScreen";
+import { RetailScreen } from "./components/RetailScreen";
+import { FashionOracle } from "./components/FashionOracle";
+import { isTauri, MODEL_PRESETS, generateOnce } from "./lib/llm";
+import { DB_PROGRESS_EVENT } from "./lib/db";
 import { MODEL_CATALOGUE } from "./lib/modelCache";
 import type { EmbeddingStatus, RetrievedChunk } from "./lib/rag";
 import type { LlmBackend, ApiConfig, WebLlmOptions, ModelPreset } from "./lib/llm";
@@ -22,6 +26,7 @@ import "./App.css";
 
 type Modal = "models" | "search" | null;
 type ToolbarPanel = "none" | "presets" | "llm" | "api" | "embed";
+type AppMode = "welcome" | "chat" | "retail" | "oracle";
 
 // ── Backend status badges ──────────────────────────────────────────────────
 
@@ -318,6 +323,7 @@ export default function App() {
   const chat = useChat();
   const { theme, toggleTheme } = useTheme();
   const tts = useTts(chat.config?.ttsModelId || undefined);
+  const [appMode, setAppMode] = useState<AppMode>("welcome");
   const [modal, setModal] = useState<Modal>(null);
   const [section, setSection] = useState<SidebarSection>("conversations");
   const [ragDebugVisible, setRagDebugVisible] = useState(false);
@@ -494,15 +500,86 @@ export default function App() {
     );
   }, [chat.activeAgent, chat.conversations, chat.activeConvId]);
 
-  // Show splash for the full initial load. Include "idle" (the pre-effect
-  // state on the very first render) so config is never null when the main UI
-  // becomes visible for the first time.
+  const [dbMessages, setDbMessages] = useState<string[]>([]);
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const msg = (e as CustomEvent<{ message: string }>).detail.message;
+      setDbMessages((prev) => [...prev.slice(-6), msg]);
+    };
+    window.addEventListener(DB_PROGRESS_EVENT, handler);
+    return () => window.removeEventListener(DB_PROGRESS_EVENT, handler);
+  }, []);
+
+  // Show splash during full initial load.
   const isInitialising = (chat.status === "idle" || chat.status === "loading-models") && chat.conversations.length === 0;
   if (isInitialising) {
     return (
       <div className="splash">
         <div className="spinner" />
         <p>Initialising…</p>
+        {dbMessages.length > 0 && (
+          <div className="splash-log">
+            {dbMessages.map((m, i) => <p key={i}>{m}</p>)}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  if (appMode === "welcome") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <WelcomeScreen
+          onSelectChat={() => setAppMode("chat")}
+          onSelectRetail={() => setAppMode("retail")}
+          onSelectOracle={() => setAppMode("oracle")}
+          logMessages={dbMessages}
+        />
+      </div>
+    );
+  }
+
+  const describeImageFn = async (dataUrl: string) => {
+    if (!chat.config) throw new Error("No model loaded — configure a model in Settings first");
+    return generateOnce(
+      "Describe this fashion item for a product search query. Be concise (under 20 words): mention type, main color, other colors, style/pattern, and gender if apparent.",
+      "You are a fashion product image analyzer. Reply with only a product description, nothing else.",
+      chat.config,
+      undefined,
+      dataUrl,
+    );
+  };
+
+  if (appMode === "retail") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <RetailScreen
+          onBack={() => setAppMode("welcome")}
+          embedModelId={chat.activeEmbedModelId ?? undefined}
+          whisperModelId={chat.config?.whisperModelId || undefined}
+          onDescribeImage={describeImageFn}
+          onAnalyze={async (userText, systemPrompt) => {
+            if (!chat.config) throw new Error("No model loaded");
+            return generateOnce(userText, systemPrompt, chat.config);
+          }}
+        />
+      </div>
+    );
+  }
+
+  if (appMode === "oracle") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <FashionOracle
+          onBack={() => setAppMode("welcome")}
+          embedModelId={chat.activeEmbedModelId ?? undefined}
+          whisperModelId={chat.config?.whisperModelId || undefined}
+          onDescribeImage={describeImageFn}
+          onAnalyze={async (userText, systemPrompt) => {
+            if (!chat.config) throw new Error("No model loaded");
+            return generateOnce(userText, systemPrompt, chat.config);
+          }}
+        />
       </div>
     );
   }
@@ -554,6 +631,14 @@ export default function App() {
           aria-label="Toggle sidebar"
         >
           ☰
+        </button>
+        <button
+          className="home-btn"
+          onClick={() => setAppMode("welcome")}
+          title="Back to home"
+          aria-label="Back to home"
+        >
+          ⌂
         </button>
         <WebGpuBanner />
         <Toolbar

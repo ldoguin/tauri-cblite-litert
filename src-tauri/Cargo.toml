@@ -23,7 +23,7 @@ hex = "0.4"
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
-tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "0ad43b5d2b30bff4ea12cbc5dd530216c65e1ed2",  features = ["native-cbl"] }
+tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "1b6b9b6acd42ffa24dc32089d6b3b03b0db02f7c",  features = ["native-cbl"] }
 tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "16a77423b79536f59f3d79b9755ad5c4bfc45b5e"}
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -50,8 +50,4 @@ codegen-units = 1
 inherits = "release"
 strip = true
 panic = "abort"
-
-# Override the git dep with a local copy whose build.rs supports Linux→Android.
-[patch."https://github.com/ldoguin/couchbase-lite-rust"]
-couchbase_lite = { path = "../vendor/couchbase-lite-rust" }
 

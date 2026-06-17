@@ -186,7 +186,7 @@ async function embedWithLiteRtPlugin(text: string, modelId: string): Promise<num
     modelId,
     inputs: [input_word_ids, input_mask, input_type_ids],
     inputTypes: ["int32", "int32", "int32"],
-  });
+  } as unknown as Parameters<typeof runInference>[0]);
   // First output tensor is the embedding vector
   return l2Normalise(outputs[0] ?? []);
 }
