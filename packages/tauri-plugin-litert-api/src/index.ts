@@ -36,6 +36,12 @@ export interface InferenceInput {
   modelId: string;
   /** One flat Float32 array per input tensor, in order. */
   inputs: number[][];
+  /**
+   * Optional per-input dtype hints (e.g. "int32" for BERT token IDs, "float").
+   * Forwarded to the native plugin; ignored on the web backend (which infers
+   * dtype from the model's input details).
+   */
+  inputTypes?: string[];
 }
 
 export interface InferenceOutput {

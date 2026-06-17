@@ -23,14 +23,22 @@ hex = "0.4"
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
-tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "0ad43b5d2b30bff4ea12cbc5dd530216c65e1ed2",  features = ["native-cbl"] }
-tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "16a77423b79536f59f3d79b9755ad5c4bfc45b5e"}
+# Local checkouts so the iOS (Swift) native side can be developed in-tree.
+# native-cbl (the desktop CBL C library) is enabled only on desktop below — on
+# mobile the native Couchbase Lite SDK (Kotlin/Swift) is used instead.
+tauri-plugin-cblite = { path = "../../tauri-plugin-cblite", default-features = false }
+tauri-plugin-litert = { path = "../../tauri-plugin-litert" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "stream", "cookies", "gzip", "brotli", "deflate"] }
 tokio = { version = "1", features = ["rt-multi-thread", "fs", "io-util"] }
 futures-util = "0.3"
 base64 = "0.22"
+
+# Desktop only: pull in the native Couchbase Lite C library. Excluded on iOS and
+# Android, where the plugin delegates to the platform-native CBL SDK.
+[target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
+tauri-plugin-cblite = { path = "../../tauri-plugin-cblite", features = ["native-cbl"] }
 
 [dev-dependencies]
 # Direct access to the LiteRT backends for integration tests in tests/
@@ -51,7 +59,11 @@ inherits = "release"
 strip = true
 panic = "abort"
 
-# Override the git dep with a local copy whose build.rs supports Linux→Android.
-[patch."https://github.com/ldoguin/couchbase-lite-rust"]
-couchbase_lite = { path = "../vendor/couchbase-lite-rust" }
+# Patched swift-rs: passes `--triple` to `swift build` for iOS targets so
+# SwiftPM selects the correct .xcframework slice for binaryTarget dependencies
+# (CouchbaseLiteSwift, CLiteRTLM). Upstream 1.0.7 only overrides the swiftc
+# target, leaving SPM planning for macOS — which breaks any plugin whose Swift
+# package depends on a binary framework. See swift-rs/src-rs/build.rs "PATCH".
+[patch.crates-io]
+swift-rs = { path = "../../swift-rs" }
 

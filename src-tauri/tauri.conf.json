@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm build && rm -rf dist/node_modules",
     "frontendDist": "../dist"
   },
   "app": {
@@ -36,7 +36,7 @@
       "icons/icon.ico"
     ],
     "iOS": {
-      "developmentTeam": "",
+      "developmentTeam": "447XKHA4H6",
       "minimumSystemVersion": "16.0"
     },
     "android": {

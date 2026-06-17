@@ -117,6 +117,11 @@ export interface ModelConfig {
    * Defaults to Xenova/whisper-tiny.en when empty.
    */
   whisperModelId: string;
+  /**
+   * Optional model id selecting a text-to-speech voice/engine. Empty = use the
+   * browser's built-in Web Speech API (speechSynthesis).
+   */
+  ttsModelId: string;
   /** Wake phrase matched against Whisper transcript (e.g. "jarvis"). Empty = disabled. */
   wakePhrase: string;
   /** Characters per chunk when splitting documents for embedding (default 400) */
@@ -145,6 +150,7 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   ragSourceTypes: ["knowledge", "message"] as ("knowledge" | "message")[],
   activeAgentId: null,
   whisperModelId: "",
+  ttsModelId: "",
   wakePhrase: "jarvis",
   temperature: 0.8,
   topP: 0.95,

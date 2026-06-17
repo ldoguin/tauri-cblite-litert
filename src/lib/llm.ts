@@ -83,7 +83,10 @@ export async function loadModels(config: ModelConfig): Promise<void> {
       modelPath: config.lmModelPath,
       accelerator: config.accelerator,
       maxTokens: config.maxTokens,
-      vision: true, // enable vision backend for multimodal models (Gemma 4 E2B/E4B)
+      // Vision backend only for multimodal models (Gemma 4 E2B/E4B): requesting
+      // it for text-only models fails engine creation with
+      // "TF_LITE_VISION_ENCODER not found in the model".
+      vision: /gemma[-_]?4|e2b|e4b/i.test(config.lmModelPath),
     });
     setActiveLmModel(LM_MODEL_ID);
   }

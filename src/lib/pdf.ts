@@ -138,7 +138,7 @@ export async function renderPdfPage(
       canvas.height = Math.round(viewport.height);
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Canvas 2d context unavailable");
-      await page.render({ canvasContext: ctx as CanvasRenderingContext2D, viewport }).promise;
+      await page.render({ canvas, canvasContext: ctx as CanvasRenderingContext2D, viewport }).promise;
       return canvas.toDataURL("image/jpeg", 0.85);
     } finally {
       page.cleanup();

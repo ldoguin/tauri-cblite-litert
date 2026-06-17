@@ -101,8 +101,10 @@ async function transcribe(audio: Float32Array) {
       task: "transcribe",
       // Disable Whisper's internal no-speech gate so short/quiet clips still transcribe.
       // Without this, Whisper returns {"text":""} when it classifies audio as non-speech.
+      // Cast: no_speech_threshold isn't in the transformers.js option typings.
       no_speech_threshold: 1.0,
-    });
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
     console.log("[WhisperWorker] raw result:", JSON.stringify(result));
     const text: string = Array.isArray(result)
       ? result.map((r: { text: string }) => r.text).join(" ").trim()
