@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from "react";
 import type { Conversation, Agent } from "../lib/types";
 
-export type SidebarSection = "conversations" | "knowledge" | "agents" | "settings";
+export type SidebarSection = "conversations" | "knowledge" | "agents";
 
 interface Props {
   section: SidebarSection;
@@ -106,12 +106,12 @@ export function Sidebar({
     <aside className="sidebar">
       {/* ── Section tab bar ──────────────────────────────────────────────── */}
       <nav className="sidebar-tabs">
-        {(["conversations", "knowledge", "agents", "settings"] as SidebarSection[]).map((s) => {
+        {(["conversations", "knowledge", "agents"] as SidebarSection[]).map((s) => {
           const icons: Record<SidebarSection, string> = {
-            conversations: "💬", knowledge: "📚", agents: "🤖", settings: "⚙️",
+            conversations: "💬", knowledge: "📚", agents: "🤖",
           };
           const labels: Record<SidebarSection, string> = {
-            conversations: "Chats", knowledge: "Docs", agents: "Agents", settings: "Settings",
+            conversations: "Chats", knowledge: "Docs", agents: "Agents",
           };
           return (
             <button
@@ -349,33 +349,6 @@ export function Sidebar({
         </>
       )}
 
-      {/* ── Settings ──────────────────────────────────────────────────────── */}
-      {section === "settings" && (
-        <>
-          <div className="sidebar-header">
-            <span className="sidebar-title">Settings</span>
-          </div>
-
-          <ul className="conv-list">
-            {([
-              { id: "settings-models",     label: "Models",     icon: "🤖" },
-              { id: "settings-generation", label: "Generation", icon: "⚡" },
-              { id: "settings-web-search", label: "Web search", icon: "🌐" },
-              { id: "settings-wake-word",  label: "Wake word",  icon: "👂" },
-            ] as const).map(({ id, label, icon }) => (
-              <li key={id} className="conv-item">
-                <button
-                  className="conv-btn"
-                  onClick={() => document.getElementById(id)?.scrollIntoView({ behavior: "smooth", block: "start" })}
-                >
-                  <span className="conv-icon">{icon}</span>
-                  <span className="conv-label">{label}</span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        </>
-      )}
     </aside>
   );
 }

@@ -5,6 +5,7 @@ import rehypeHighlight from "rehype-highlight";
 import type { Message } from "../lib/types";
 import { loadImageFromBlob, isBlobRef } from "../lib/db";
 import type { ToolExecution } from "../lib/tools";
+import { isTauri } from "../lib/llm";
 
 // ── Code block with copy button ────────────────────────────────────────────
 
@@ -36,6 +37,17 @@ function CodeBlock({ className, children }: { className?: string; children?: Rea
 
 // ── Markdown renderer ──────────────────────────────────────────────────────
 
+async function openExternalUrl(href: string) {
+  if (isTauri()) {
+    const { invoke } = await import("@tauri-apps/api/core");
+    await invoke("open_url", { url: href }).catch(() => {
+      window.open(href, "_blank", "noopener,noreferrer");
+    });
+  } else {
+    window.open(href, "_blank", "noopener,noreferrer");
+  }
+}
+
 function MarkdownContent({ content }: { content: string }) {
   return (
     <ReactMarkdown
@@ -51,6 +63,22 @@ function MarkdownContent({ content }: { content: string }) {
             return <CodeBlock className={className}>{children}</CodeBlock>;
           }
           return <code className={className} {...props}>{children}</code>;
+        },
+        a({ href, children, ...props }) {
+          if (!href) return <a {...props}>{children}</a>;
+          return (
+            <a
+              href={href}
+              {...props}
+              onClick={(e) => {
+                e.preventDefault();
+                openExternalUrl(href);
+              }}
+              title={href}
+            >
+              {children}
+            </a>
+          );
         },
       }}
     >

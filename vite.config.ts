@@ -53,11 +53,11 @@ export default defineConfig(async () => ({
     staticAssetsPlugin(),
     viteStaticCopy({
       targets: [
-        { src: "node_modules/@ricky0123/vad-web/dist/vad.worklet.bundle.min.js", dest: "./" },
-        { src: "node_modules/@ricky0123/vad-web/dist/silero_vad_v5.onnx", dest: "./" },
-        { src: "node_modules/@ricky0123/vad-web/dist/silero_vad_legacy.onnx", dest: "./" },
-        { src: `${ORT_DIST}/*.wasm`, dest: "./" },
-        { src: `${ORT_DIST}/*.mjs`, dest: "./" },
+        { src: path.resolve(VAD_DIST, "vad.worklet.bundle.min.js"), dest: "./", rename: { stripBase: true } },
+        { src: path.resolve(VAD_DIST, "silero_vad_v5.onnx"), dest: "./", rename: { stripBase: true } },
+        { src: path.resolve(VAD_DIST, "silero_vad_legacy.onnx"), dest: "./", rename: { stripBase: true } },
+        { src: path.resolve(ORT_DIST, "*.wasm"), dest: "./", rename: { stripBase: true } },
+        { src: path.resolve(ORT_DIST, "*.mjs"), dest: "./", rename: { stripBase: true } },
       ],
     }),
   ],

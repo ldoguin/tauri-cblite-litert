@@ -38,7 +38,8 @@ import {
   deleteAgent,
 } from "../lib/db";
 import { extractPdfContent, extractPdfPages, renderPdfPage } from "../lib/pdf";
-import { MODEL_CATALOGUE } from "../lib/modelCache";
+import { MODEL_CATALOGUE, resolveDefaultModelPaths } from "../lib/modelCache";
+import { DEFAULT_AGENTS } from "../lib/defaultAgents";
 import { fetchUrlText } from "../lib/urlIngest";
 import {
   embed,
@@ -57,11 +58,14 @@ import {
   unloadModels,
   generateStream,
   generateOnce,
+  stripThinking,
   loadWebLlm,
   unloadWebLlm,
   getActiveBackend,
   persistApiConfig,
   loadPersistedApiConfig,
+  loadLmFromPath,
+  scanModels,
   isTauri,
   EMBED_MODEL_ID,
   type LlmBackend,
@@ -69,6 +73,7 @@ import {
   type WebLlmOptions,
   type ModelPreset,
 } from "../lib/llm";
+import type { ScannedModelMeta } from "../lib/modelCache";
 import type {
   Conversation,
   Message,
@@ -107,11 +112,13 @@ export function useChat() {
   const [error, setError] = useState<string | null>(null);
 
   const [config, setConfigState] = useState<ModelConfig | null>(null);
+  const [availableModels, setAvailableModels] = useState<ScannedModelMeta[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [knowledgeChunks, setKnowledgeChunks] = useState<KnowledgeChunk[]>([]);
   const [streamingContent, setStreamingContent] = useState<string | null>(null);
+  const [lastCompletedResponse, setLastCompletedResponse] = useState<string | null>(null);
   const [streamingTokensPerSec, setStreamingTokensPerSec] = useState<number>(0);
   const [streamingTokenCount, setStreamingTokenCount] = useState<number>(0);
   const streamStartRef = useRef<number>(0);
@@ -245,11 +252,28 @@ export function useChat() {
       try {
         setStatus("loading-models");
         const dbDir = await resolveDbDir();
-        await initDatabase(dbDir);
+        const ftsLanguage = localStorage.getItem("ftsLanguage") ?? "en";
+        await initDatabase(dbDir, ftsLanguage);
         if (cancelled) return;
 
-        const cfg = await loadConfig();
+        let cfg = await loadConfig();
         if (cancelled) return;
+
+        // On Tauri, auto-fill empty model paths from any downloaded models.
+        if (isTauri() && (!cfg.lmModelPath || !cfg.embeddingModelPath)) {
+          const defaults = await resolveDefaultModelPaths();
+          let changed = false;
+          if (!cfg.lmModelPath && defaults.lmModelPath) {
+            cfg = { ...cfg, lmModelPath: defaults.lmModelPath };
+            changed = true;
+          }
+          if (!cfg.embeddingModelPath && defaults.embeddingModelPath) {
+            cfg = { ...cfg, embeddingModelPath: defaults.embeddingModelPath };
+            changed = true;
+          }
+          if (changed) saveConfig(cfg).catch(() => {});
+        }
+
         setConfigState(cfg);
 
         const convs = await listConversations();
@@ -260,8 +284,46 @@ export function useChat() {
         if (cancelled) return;
         setKnowledgeChunks(chunks);
 
-        const agentList = await listAgents();
+        let agentList = await listAgents();
         if (cancelled) return;
+        // Seed default agents on first run (empty DB).
+        if (agentList.length === 0) {
+          const now = new Date().toISOString();
+          const seeded = DEFAULT_AGENTS.map((preset) => ({
+            id: uuidv4(),
+            name: preset.name,
+            description: preset.description,
+            systemPrompt: preset.systemPrompt,
+            toolIds: preset.toolIds,
+            createdAt: now,
+            updatedAt: now,
+          }));
+          await Promise.all(seeded.map(saveAgent));
+          agentList = seeded;
+        } else {
+          // Migrate: for each existing preset agent (matched by name), add any
+          // tool IDs that appeared in DEFAULT_AGENTS since the agent was created.
+          // User-added tools are preserved; nothing is removed.
+          const migrations: Promise<void>[] = [];
+          for (const existing of agentList) {
+            const preset = DEFAULT_AGENTS.find((p) => p.name === existing.name);
+            if (!preset) continue;
+            const missing = preset.toolIds.filter((id) => !existing.toolIds.includes(id));
+            const removedSystemPrompt = existing.systemPrompt !== preset.systemPrompt;
+            if (missing.length === 0 && !removedSystemPrompt) continue;
+            const updated = {
+              ...existing,
+              toolIds: [...existing.toolIds, ...missing],
+              systemPrompt: preset.systemPrompt,
+              updatedAt: new Date().toISOString(),
+            };
+            migrations.push(saveAgent(updated).then(() => {
+              const idx = agentList.indexOf(existing);
+              if (idx !== -1) agentList[idx] = updated;
+            }));
+          }
+          if (migrations.length > 0) await Promise.all(migrations);
+        }
         setAgents(agentList);
         // Router is always the active responder — agents are config only.
 
@@ -276,12 +338,13 @@ export function useChat() {
         setEmbeddingStatus(embStatus);
         setEmbeddingBackend(getEmbeddingBackend());
 
-        // Load LiteRT models on Tauri
-        if (cfg.lmModelPath || cfg.embeddingModelPath) {
-          await loadModels(cfg);
-          // Check cancelled BEFORE setting the flag — if the effect was cleaned
-          // up (StrictMode remount or config change) while loadModels was awaiting,
-          // modelsLoaded must stay false so the next mount re-loads correctly.
+        // Load LiteRT models on Tauri.
+        // Guard cancelled BEFORE calling loadModels — if StrictMode cleanup fired
+        // while earlier awaits were in flight (setting cancelled=true), we must
+        // not start Engine::new at all. Concurrent Engine::new calls corrupt the
+        // LiteRT-LM global accelerator registry and make create_conversation return null.
+        if ((cfg.lmModelPath || cfg.embeddingModelPath) && !cancelled) {
+          await loadModels(cfg, availableModels);
           if (cancelled) return;
           modelsLoaded.current = true;
         }
@@ -309,7 +372,8 @@ export function useChat() {
     (async () => {
       try {
         const dbDir = await resolveDbDir();
-        await initDatabase(dbDir);
+        const ftsLanguage = localStorage.getItem("ftsLanguage") ?? "en";
+        await initDatabase(dbDir, ftsLanguage);
         if (!isMountedRef.current) return;
         const cfg = await loadConfig();
         if (!isMountedRef.current) return;
@@ -331,7 +395,7 @@ export function useChat() {
         setEmbeddingStatus(embStatus);
         setEmbeddingBackend(getEmbeddingBackend());
         if (cfg.lmModelPath || cfg.embeddingModelPath) {
-          await loadModels(cfg);
+          await loadModels(cfg, availableModels);
           if (!isMountedRef.current) return;
           modelsLoaded.current = true;
         }
@@ -344,10 +408,21 @@ export function useChat() {
     })();
   }, []);
 
+  // ── Model folder scan ────────────────────────────────────────────────────
+
+  useEffect(() => {
+    if (!config?.modelFolder) { setAvailableModels([]); return; }
+    scanModels(config.modelFolder)
+      .then(setAvailableModels)
+      .catch(() => setAvailableModels([]));
+  }, [config?.modelFolder]);
+
   // ── Config ───────────────────────────────────────────────────────────────
 
   const updateConfig = useCallback(async (next: ModelConfig) => {
     await saveConfig(next);
+    // Persist ftsLanguage to localStorage so initDatabase can read it before CBL opens.
+    if (next.ftsLanguage) localStorage.setItem("ftsLanguage", next.ftsLanguage);
     if (!isMountedRef.current) return;
     setConfigState(next);
     // Invalidate the RAG pool cache whenever config changes — ragSourceTypes
@@ -364,7 +439,7 @@ export function useChat() {
         setStatus("loading-models");
         setError(null);
         try {
-          await loadModels(next);
+          await loadModels(next, availableModels);
           modelsLoaded.current = true;
           if (isMountedRef.current) setStatus("ready");
         } catch (err) {
@@ -461,12 +536,18 @@ export function useChat() {
     setStatus("loading-models");
     setError(null);
     try {
-      await loadWebLlm({ modelUrl: url });
+      const isLocalPath = url.startsWith("/") || /^[a-zA-Z]:[/\\]/.test(url);
+      if (isTauri() && isLocalPath) {
+        await loadLmFromPath(url, {
+          accelerator: configRef.current?.accelerator,
+          scanned: availableModels,
+        });
+      } else {
+        await loadWebLlm({ modelUrl: url });
+      }
       if (!isMountedRef.current) return;
       setActiveLlmModelId(modelId);
       setLlmBackend(getActiveBackend());
-      // Persist the catalogue contextLength into config so the context bar
-      // shows the correct window size for this model.
       const catalogueEntry = MODEL_CATALOGUE.find((m) => m.id === modelId);
       if (catalogueEntry?.contextLength && configRef.current) {
         const next = { ...configRef.current, contextLength: catalogueEntry.contextLength };
@@ -515,6 +596,16 @@ export function useChat() {
     setActiveConvId(id);
     setLastRagChunks([]);
     pendingConvIdRef.current = id;
+    // Swap LM model if the conversation has a model override different from current config
+    const conv = conversations.find((c) => c.id === id);
+    if (isTauri() && conv?.modelPath && conv.modelPath !== configRef.current?.lmModelPath) {
+      const cfg = configRef.current;
+      setStatus("loading-models");
+      unloadModels()
+        .then(() => loadLmFromPath(conv.modelPath!, { accelerator: cfg?.accelerator }))
+        .then(() => { if (isMountedRef.current) setStatus("ready"); })
+        .catch((e) => { if (isMountedRef.current) { setStatus("error"); setError(String(e)); } });
+    }
     return listMessages(id).then((msgs) => {
       // Discard if the user switched away before this response arrived.
       if (pendingConvIdRef.current !== id) return;
@@ -523,7 +614,7 @@ export function useChat() {
       if (pendingConvIdRef.current !== id) return;
       if (isMountedRef.current) { setError(String(e)); setStatus("error"); }
     });
-  }, []);
+  }, [conversations]);
 
   const renameConversation = useCallback(async (id: string, title: string) => {
     const conv = await getConversation(id);
@@ -540,6 +631,26 @@ export function useChat() {
     await saveConversation(updated);
     if (isMountedRef.current) setConversations((prev) => prev.map((c) => (c.id === id ? updated : c)));
   }, []);
+
+  const switchConversationModel = useCallback(async (id: string, modelPath: string | undefined) => {
+    const conv = await getConversation(id);
+    if (!conv || !isMountedRef.current) return;
+    const updated = { ...conv, modelPath: modelPath || undefined, updatedAt: new Date().toISOString() };
+    await saveConversation(updated);
+    if (isMountedRef.current) setConversations((prev) => prev.map((c) => (c.id === id ? updated : c)));
+    // Reload the LM only if this is the active conversation
+    if (activeConvIdRef.current !== id || !isTauri()) return;
+    if (!isMountedRef.current) return;
+    setStatus("loading-models");
+    try {
+      await unloadModels();
+      const resolvedPath = modelPath || config?.lmModelPath;
+      if (resolvedPath) await loadLmFromPath(resolvedPath, { accelerator: config?.accelerator, scanned: availableModels });
+      if (isMountedRef.current) setStatus("ready");
+    } catch (err) {
+      if (isMountedRef.current) { setStatus("error"); setError(String(err)); }
+    }
+  }, [config]);
 
   const removeConversation = useCallback(async (id: string) => {
     // Abort any in-flight generation for this conversation so onDone doesn't
@@ -694,6 +805,7 @@ export function useChat() {
 
     setStatus("generating");
     setStreamingContent("");
+    setLastCompletedResponse(null);
     setStreamingTokensPerSec(0);
     streamStartRef.current = Date.now();
     streamTokenCountRef.current = 0;
@@ -870,21 +982,27 @@ export function useChat() {
           if (elapsed > 0.5) {
             setStreamingTokensPerSec(streamTokenCountRef.current / elapsed);
           }
-          setStreamingContent(accumulated);
+          // Hide <think>…</think> reasoning blocks while streaming.
+          // During an open block the visible content is empty; once closed it's stripped.
+          setStreamingContent(stripThinking(accumulated));
         },
         onDone: async (latencyMs: number) => {
           const wasStopped = abortController.signal.aborted;
+          const visible = stripThinking(accumulated);
           // Always clear these regardless of mount state
           sendingRef.current = false;
+          if (visible.trim() && !wasStopped) {
+            setLastCompletedResponse(visible);
+          }
           setStreamingContent(null);
 
           if (isMountedRef.current) setStreamingAgentName(null);
           if (!isMountedRef.current) return;
           // Save whatever was accumulated — even a partial response is useful
-          if (accumulated.trim()) {
+          if (visible.trim()) {
             const assistantMsg: Message = {
               ...placeholderMsg,
-              content: accumulated,
+              content: visible,
               latencyMs,
               ragSourceIds,
               stopped: wasStopped || undefined,
@@ -898,7 +1016,7 @@ export function useChat() {
             // Only embed and notify on a complete (non-stopped) response
             if (!wasStopped) {
               void embedAndSave(assistantMsg);
-              notifyIfHidden("Response ready", accumulated.slice(0, 80) + (accumulated.length > 80 ? "…" : ""));
+              notifyIfHidden("Response ready", visible.slice(0, 80) + (visible.length > 80 ? "…" : ""));
             }
           } else if (isMountedRef.current) {
             setMessages((prev) => prev.filter((m) => m.id !== assistantId));
@@ -1130,12 +1248,13 @@ export function useChat() {
       {
         onChunk: (c) => {
           summaryText += c;
-          if (isMountedRef.current) setStreamingContent(summaryText);
+          if (isMountedRef.current) setStreamingContent(stripThinking(summaryText));
         },
         onDone: async () => {
           if (isMountedRef.current) setStreamingContent(null);
+          const visibleSummary = stripThinking(summaryText).trim();
           // Don't commit if the user aborted or summary was empty
-          if (summaryAbort.signal.aborted || !summaryText.trim()) {
+          if (summaryAbort.signal.aborted || !visibleSummary) {
             sendingRef.current = false;
             if (isMountedRef.current) setStatus("ready");
             return;
@@ -1145,7 +1264,7 @@ export function useChat() {
             id: uuidv4(),
             conversationId: convId,
             role: "assistant",
-            content: `**[Conversation summary]**\n\n${summaryText.trim()}`,
+            content: `**[Conversation summary]**\n\n${visibleSummary}`,
             // Place at the timestamp of the first summarised message
             createdAt: toSummarise[0].createdAt,
           };
@@ -1737,7 +1856,7 @@ export function useChat() {
   return {
     status, error,
     config, conversations, activeConvId, messages, knowledgeChunks,
-    streamingContent, streamingAgentName, streamingTokensPerSec, streamingTokenCount, lastRagChunks, lastToolExecutions,
+    streamingContent, lastCompletedResponse, streamingAgentName, streamingTokensPerSec, streamingTokenCount, lastRagChunks, lastToolExecutions,
     ragEnabled, setRagEnabled,
     allTools: [
       ...(knowledgeSearchToolRef.current ? [knowledgeSearchToolRef.current] : []),
@@ -1755,6 +1874,7 @@ export function useChat() {
     configureApi, initEmbeddingEngine,
     loadLlmFromCache, loadEmbedFromCache,
     retryInit,
+    availableModels, switchConversationModel,
     createConversation, selectConversation, renameConversation, updateConversationInstruction, removeConversation,
     sendMessage, stopGeneration, editMessage, branchConversation, exportConversation, searchConversations,
     toggleBookmark, getBookmarks,

@@ -160,6 +160,37 @@ export function SettingsPanel({ config, onSave, onClose, embedded }: Props) {
               (~50 MB).
             </p>
 
+            {isTauri() && (
+              <>
+                <label className="field-label" style={{ marginTop: 12 }}>
+                  Model folder <span className="field-optional">(scan for .litertlm files)</span>
+                </label>
+                <input
+                  className="field-input"
+                  placeholder="/home/user/models"
+                  value={draft.modelFolder ?? ""}
+                  onChange={(e) => set("modelFolder", e.target.value)}
+                />
+                <p className="hint">
+                  Folder to scan for <code>.litertlm</code> files. Discovered models
+                  appear in the conversation model picker. Leave empty to use the single
+                  path above.
+                </p>
+              </>
+            )}
+
+            <label className="field-label">FTS language</label>
+            <input
+              className="field-input"
+              placeholder="en"
+              value={draft.ftsLanguage ?? "en"}
+              onChange={(e) => set("ftsLanguage", e.target.value)}
+            />
+            <p className="hint">
+              BCP-47 language code for full-text search stemming (e.g. <code>en</code>, <code>fr</code>, <code>de</code>, <code>es</code>).
+              Takes effect after the database is re-opened. Default: <code>en</code>.
+            </p>
+
             <label className="field-label">Accelerator</label>
             <select
               className="field-select"

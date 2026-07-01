@@ -13,6 +13,32 @@ import {
   type DownloadProgress,
   type ModelKind,
 } from "../lib/modelCache";
+import { isTauri } from "../lib/llm";
+
+// ── RAM badge ─────────────────────────────────────────────────────────────────
+
+interface MemInfo { totalBytes: number; availableBytes: number; }
+
+/** Estimated RAM a model needs at runtime: weights (≈ file size, mmap'd) +
+ *  ~30 % headroom for KV cache at typical context lengths and activations. */
+function ramEstimate(sizeBytes: number): number {
+  return Math.round(sizeBytes * 1.3);
+}
+
+function RamBadge({ sizeBytes, mem }: { sizeBytes: number; mem: MemInfo | null }) {
+  const needed = ramEstimate(sizeBytes);
+  const label = `~${formatBytes(needed)} RAM`;
+  if (!mem) {
+    return <span className="ram-badge ram-neutral" title="Device RAM unavailable">{label}</span>;
+  }
+  const { availableBytes, totalBytes } = mem;
+  const cls =
+    availableBytes >= needed * 1.5 ? "ram-ok"
+    : availableBytes >= needed     ? "ram-warn"
+    :                                "ram-err";
+  const tip = `${formatBytes(availableBytes)} free · ${formatBytes(totalBytes)} total`;
+  return <span className={`ram-badge ${cls}`} title={tip}>{label}</span>;
+}
 
 interface Props {
   /** Currently active LLM model id (from useChat) */
@@ -43,6 +69,7 @@ export function ModelManagerPanel({
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [memInfo, setMemInfo] = useState<MemInfo | null>(null);
 
   const isMountedRef = useRef(false);
   // Track active download IDs so they can be cancelled when the panel unmounts,
@@ -60,6 +87,15 @@ export function ModelManagerPanel({
   // Sync cache state on mount
   useEffect(() => {
     syncCacheRegistry().then((m) => { if (isMountedRef.current) setModels(m); }).catch(() => {});
+  }, []);
+
+  // Fetch device RAM once — used to colour-code the RAM badge on each model card.
+  useEffect(() => {
+    if (!isTauri()) return;
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke<MemInfo | null>("get_memory_info"))
+      .then((info) => { if (info) setMemInfo(info); })
+      .catch(() => {});
   }, []);
 
   const handleDownload = useCallback(async (modelId: string) => {
@@ -109,8 +145,22 @@ export function ModelManagerPanel({
     setLoadingId(model.id);
     setError(null);
     try {
-      if (model.kind === "llm") await onLoadLlm(model.url, model.id);
-      else if (model.kind === "embed") await onLoadEmbed(model.url, model.id);
+      if (model.kind === "llm") {
+        let urlOrPath = model.url;
+        // "web" entries load directly from their URL; "tauri" (desktop) and
+        // "android" entries are downloaded locally first and must resolve
+        // to the on-disk path before loading.
+        if (isTauri() && model.platform !== "web") {
+          const { invoke } = await import("@tauri-apps/api/core");
+          const fileName = model.fileName ?? model.url.split("/").pop() ?? `${model.id}.bin`;
+          const localPath = await invoke<string | null>("get_model_path", { fileName });
+          if (!localPath) throw new Error("Model not found on disk — try downloading again");
+          urlOrPath = localPath;
+        }
+        await onLoadLlm(urlOrPath, model.id);
+      } else if (model.kind === "embed") {
+        await onLoadEmbed(model.url, model.id);
+      }
     } catch (err) {
       if (isMountedRef.current) setError(String(err));
     } finally {
@@ -194,6 +244,9 @@ export function ModelManagerPanel({
                       )}
 
                       <div className="model-card-actions">
+                        {kind === "llm" && (
+                          <RamBadge sizeBytes={model.sizeBytes} mem={memInfo} />
+                        )}
                         {downloading ? (
                           <button
                             className="btn-sm danger"
@@ -292,13 +345,13 @@ function CustomUrlLoader({
           value={kind}
           onChange={(e) => setKind(e.target.value as "llm" | "embed")}
         >
-          <option value="llm">LLM (.task)</option>
+          <option value="llm">{isTauri() ? "LLM (.litertlm)" : "LLM (.task)"}</option>
           <option value="embed">Embedder (.tflite)</option>
         </select>
         <input
           className="field-input"
           type="url"
-          placeholder="https://huggingface.co/…/model.task"
+          placeholder={isTauri() ? "/path/to/model.litertlm" : "https://huggingface.co/…/model.task"}
           value={url}
           onChange={(e) => setUrl(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && handleLoad()}

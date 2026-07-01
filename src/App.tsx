@@ -12,12 +12,22 @@ import { KnowledgePanel } from "./components/KnowledgePanel";
 import { SettingsPanel } from "./components/SettingsPanel";
 import { AgentEditorPane } from "./components/AgentEditorPane";
 import { ModelManagerPanel } from "./components/ModelManagerPanel";
+import { TaskModelPanel } from "./components/TaskModelPanel";
 import { SearchPanel } from "./components/SearchPanel";
 import { WebGpuBanner } from "./components/WebGpuBanner";
 import { WelcomeScreen } from "./components/WelcomeScreen";
 import { RetailScreen } from "./components/RetailScreen";
 import { FashionOracle } from "./components/FashionOracle";
-import { isTauri, MODEL_PRESETS, generateOnce } from "./lib/llm";
+import { FitnessCoach } from "./components/FitnessCoach";
+import { BackgroundStudio } from "./components/BackgroundStudio";
+import { AccessibilityDescriber } from "./components/AccessibilityDescriber";
+import { FieldInspection } from "./components/FieldInspection";
+import { ClinicalNotes } from "./components/ClinicalNotes";
+import { PhotoLibrary } from "./components/PhotoLibrary";
+import { DatasetAnnotator } from "./components/DatasetAnnotator";
+import { CropDisease } from "./components/CropDisease";
+import { isTauri, MODEL_PRESETS, generateOnce, fetchLocalLlms } from "./lib/llm";
+import type { LocalLlmServer } from "./lib/llm";
 import { DB_PROGRESS_EVENT } from "./lib/db";
 import { MODEL_CATALOGUE } from "./lib/modelCache";
 import type { EmbeddingStatus, RetrievedChunk } from "./lib/rag";
@@ -26,7 +36,7 @@ import "./App.css";
 
 type Modal = "models" | "search" | null;
 type ToolbarPanel = "none" | "presets" | "llm" | "api" | "embed";
-type AppMode = "welcome" | "chat" | "retail" | "oracle";
+type AppMode = "welcome" | "chat" | "retail" | "oracle" | "fitness" | "studio" | "accessibility" | "tasks" | "inspection" | "clinical" | "settings" | "photos" | "annotate" | "crop-disease";
 
 // ── Backend status badges ──────────────────────────────────────────────────
 
@@ -62,7 +72,7 @@ function Toolbar({
   wakeWordState, onToggleWakeWord,
   ttsEnabled, ttsState, ttsErrorMsg, onToggleTts,
   onLoadPreset, onLoadWebLlm, onUnloadWebLlm, onConfigureApi, onInitEmbedModel,
-  onShowModels,
+  onShowModels, onNavBack, navBackLabel,
 }: {
   embeddingStatus: EmbeddingStatus | null;
   llmBackend: LlmBackend;
@@ -83,6 +93,8 @@ function Toolbar({
   onConfigureApi: (cfg: ApiConfig) => void;
   onInitEmbedModel: (url: string) => void;
   onShowModels: () => void;
+  onNavBack: () => void;
+  navBackLabel: string;
 }) {
   const [panel, setPanel] = useState<ToolbarPanel>("none");
   const [llmUrl, setLlmUrl]         = useState("");
@@ -93,6 +105,22 @@ function Toolbar({
   const [embedUrl, setEmbedUrl]     = useState("");
   const [loadingPresetId, setLoadingPresetId] = useState<string | null>(null);
   const [toolbarError, setToolbarError] = useState<string | null>(null);
+  const [localServers, setLocalServers] = useState<LocalLlmServer[]>([]);
+  const [detectingLocal, setDetectingLocal] = useState(false);
+
+  const handleDetectLocal = async () => {
+    setDetectingLocal(true);
+    setToolbarError(null);
+    try {
+      const found = await fetchLocalLlms();
+      setLocalServers(found);
+      if (found.length === 0) setToolbarError("No local LLM servers found on standard ports (Ollama :11434, LM Studio :1234, llama.cpp :8080, Jan :1337).");
+    } catch (e) {
+      setToolbarError("Detection failed: " + String(e));
+    } finally {
+      setDetectingLocal(false);
+    }
+  };
 
   const handleLoadLlm = async () => {
     if (!llmUrl.trim()) return;
@@ -114,6 +142,14 @@ function Toolbar({
   return (
     <div className="toolbar">
       <div className="toolbar-left">
+        <button
+          className="nav-back-btn"
+          onClick={onNavBack}
+          title={navBackLabel}
+          aria-label={navBackLabel}
+        >
+          {navBackLabel}
+        </button>
         <EmbedBadge status={embeddingStatus} />
         <LlmBadge backend={llmBackend} />
         <label className="rag-toggle" title="When enabled, relevant context from the knowledge base and past conversations is injected into every prompt">
@@ -223,22 +259,56 @@ function Toolbar({
           </div>
         )}
 
-        {/* ── Cloud LLM fallback panel (web only, no WebGPU) ── */}
+        {/* ── Cloud / local LLM API panel ── */}
         {panel === "api" && (
-          <div className="toolbar-panel-row">
-            <input className="toolbar-input" placeholder="API base URL" style={{ width: 190 }}
-              value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} />
-            <input className="toolbar-input" placeholder="API key" style={{ width: 120 }}
-              type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
-            <input className="toolbar-input" placeholder="model" style={{ width: 150 }}
-              value={apiModel} onChange={(e) => setApiModel(e.target.value)} />
-            <button className="btn-sm" onClick={() => {
-              if (apiUrl.trim()) {
-                onConfigureApi({ baseUrl: apiUrl.trim(), apiKey: apiKey || undefined, model: apiModel.trim() });
+          <div className="toolbar-panel-col">
+            <div className="toolbar-panel-row">
+              <input className="toolbar-input" placeholder="API base URL" style={{ width: 190 }}
+                value={apiUrl} onChange={(e) => setApiUrl(e.target.value)} />
+              <input className="toolbar-input" placeholder="API key (optional)" style={{ width: 120 }}
+                type="password" value={apiKey} onChange={(e) => setApiKey(e.target.value)} />
+              <input className="toolbar-input" placeholder="model" style={{ width: 150 }}
+                value={apiModel} onChange={(e) => setApiModel(e.target.value)} />
+              <button className="btn-sm" onClick={() => {
+                if (apiUrl.trim()) {
+                  onConfigureApi({ baseUrl: apiUrl.trim(), apiKey: apiKey || undefined, model: apiModel.trim() });
+                  setPanel("none");
+                }
+              }}>Save</button>
+              <button className="btn-sm secondary" onClick={() => {
+                setLocalServers([]);
+                setToolbarError(null);
                 setPanel("none");
-              }
-            }}>Save</button>
-            <button className="btn-sm secondary" onClick={() => setPanel("none")}>✕</button>
+              }}>✕</button>
+            </div>
+            <div className="toolbar-panel-row">
+              <button className="btn-sm secondary" onClick={handleDetectLocal} disabled={detectingLocal}>
+                {detectingLocal ? "Detecting…" : "🔍 Detect local"}
+              </button>
+              <span className="toolbar-hint">Ollama · LM Studio · llama.cpp · Jan</span>
+            </div>
+            {localServers.map((srv) => (
+              <div key={srv.baseUrl} className="local-llm-server">
+                <span className="local-llm-name">{srv.name}</span>
+                <span className="local-llm-url">{srv.baseUrl}</span>
+                <div className="local-llm-models">
+                  {srv.models.map((m) => (
+                    <button
+                      key={m}
+                      className="btn-sm local-llm-model-btn"
+                      onClick={() => {
+                        setApiUrl(srv.baseUrl);
+                        setApiKey("");
+                        setApiModel(m);
+                      }}
+                      title={`Use ${m} via ${srv.name}`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
@@ -328,6 +398,7 @@ export default function App() {
   const [section, setSection] = useState<SidebarSection>("conversations");
   const [ragDebugVisible, setRagDebugVisible] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [voiceInput, setVoiceInput] = useState("");
   const [voiceError, setVoiceError] = useState<string | null>(null);
   // Track which agent is open in the Agent Manager pane (null=none, "new"=create form)
@@ -349,17 +420,56 @@ export default function App() {
     return () => window.removeEventListener("rag-chatbot:storage-full", handler);
   }, []);
 
-  // Auto-speak assistant response when streaming completes.
-  // Capture the streamed text directly to avoid a React batching race where
-  // chat.messages may not yet include the new message when streamingContent clears.
-  const prevStreamingRef = useRef<string | null>(null);
+  // Android hardware/gesture back button. Tauri's AppPlugin only auto-navigates
+  // WebView history (this SPA never pushes any) or exits the app when NO
+  // listener is registered — once we register one, Tauri defers entirely to
+  // us, so we must explicitly replicate "close the topmost overlay, else exit"
+  // ourselves. Mirrors the in-app Toolbar "← Back" button's section/appMode
+  // priority (see onNavBack below) plus the modal/panel layers it doesn't cover.
+  // Stored in a ref (reassigned every render) so the Tauri listener — registered
+  // once on mount — always sees current state instead of a stale closure.
+  const handleSystemBackRef = useRef<() => void>(() => {});
+  handleSystemBackRef.current = () => {
+    if (modal !== null) { setModal(null); return; }
+    if (showKnowledgeModal) { setShowKnowledgeModal(false); return; }
+    if (activeEditAgentId !== null) { setActiveEditAgentId(null); return; }
+    if (ragDebugVisible) { setRagDebugVisible(false); return; }
+    if (appMode === "chat" && section !== "conversations") { setSection("conversations"); return; }
+    if (appMode !== "welcome") { setAppMode("welcome"); return; }
+    if (sidebarOpen) { setSidebarOpen(false); return; }
+    // True root — exit, matching the default behavior Tauri would use if no
+    // listener were registered at all.
+    import("@tauri-apps/api/core")
+      .then(({ invoke }) => invoke("plugin:app|exit"))
+      .catch(() => {});
+  };
+
   useEffect(() => {
-    const prev = prevStreamingRef.current;
-    prevStreamingRef.current = chat.streamingContent;
-    if (prev !== null && prev.length > 0 && chat.streamingContent === null && tts.enabled) {
-      tts.speak(prev);
+    if (!isTauri()) return;
+    let listener: { unregister: () => void } | null = null;
+    let cancelled = false;
+    import("@tauri-apps/api/app")
+      .then(({ onBackButtonPress }) => onBackButtonPress(() => handleSystemBackRef.current()))
+      .then((l) => { if (cancelled) { l.unregister(); } else { listener = l; } })
+      .catch(() => {});
+    return () => { cancelled = true; listener?.unregister(); };
+  }, []);
+
+  // Auto-speak completed assistant response.
+  // Uses lastCompletedResponse (set atomically in onDone with the full accumulated text)
+  // rather than tracking streamingContent transitions, which is vulnerable to React 18
+  // automatic batching swallowing the last-chunk update before the null clear.
+  const lastSpokenResponseRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (
+      chat.lastCompletedResponse &&
+      chat.lastCompletedResponse !== lastSpokenResponseRef.current &&
+      tts.enabled
+    ) {
+      lastSpokenResponseRef.current = chat.lastCompletedResponse;
+      tts.speak(chat.lastCompletedResponse);
     }
-  }, [chat.streamingContent, tts]);
+  }, [chat.lastCompletedResponse, tts.enabled]);
 
   // Load bookmarks whenever the search/bookmarks panel opens
   const openSearch = useCallback(() => {
@@ -435,7 +545,7 @@ export default function App() {
     onOpenSearch: openSearch,
     onOpenKnowledge: () => setSection("knowledge"),
     onOpenAgents: () => setSection("agents"),
-    onOpenSettings: () => setSection("settings"),
+    onOpenSettings: () => setAppMode("settings"),
     onEscape: () => {
       if (modal) { setModal(null); return; }
       if (chat.status === "generating") chat.stopGeneration();
@@ -533,6 +643,16 @@ export default function App() {
           onSelectChat={() => setAppMode("chat")}
           onSelectRetail={() => setAppMode("retail")}
           onSelectOracle={() => setAppMode("oracle")}
+          onSelectFitness={() => setAppMode("fitness")}
+          onSelectStudio={() => setAppMode("studio")}
+          onSelectAccessibility={() => setAppMode("accessibility")}
+          onSelectTasks={() => setAppMode("tasks")}
+          onSelectInspection={() => setAppMode("inspection")}
+          onSelectClinical={() => setAppMode("clinical")}
+          onSelectPhotos={() => setAppMode("photos")}
+          onSelectAnnotate={() => setAppMode("annotate")}
+          onSelectCropDisease={() => setAppMode("crop-disease")}
+          onSelectSettings={() => setAppMode("settings")}
           logMessages={dbMessages}
         />
       </div>
@@ -584,13 +704,119 @@ export default function App() {
     );
   }
 
+  const analyzeOnce = chat.config
+    ? async (userText: string, systemPrompt: string) =>
+        generateOnce(userText, systemPrompt, chat.config!)
+    : undefined;
+
+  if (appMode === "fitness") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <FitnessCoach onBack={() => setAppMode("welcome")} onAnalyze={analyzeOnce} />
+      </div>
+    );
+  }
+
+  if (appMode === "studio") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <BackgroundStudio onBack={() => setAppMode("welcome")} />
+      </div>
+    );
+  }
+
+  if (appMode === "accessibility") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <AccessibilityDescriber onBack={() => setAppMode("welcome")} onAnalyze={analyzeOnce} />
+      </div>
+    );
+  }
+
+  if (appMode === "tasks") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <TaskModelPanel modelFolder={chat.config?.modelFolder} onBack={() => setAppMode("welcome")} />
+      </div>
+    );
+  }
+
+  if (appMode === "settings") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        {chat.config && (
+          <SettingsPanel
+            embedded
+            config={chat.config}
+            onSave={chat.updateConfig}
+            onClose={() => setAppMode("welcome")}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (appMode === "annotate") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <DatasetAnnotator
+          onBack={() => setAppMode("welcome")}
+          embedModelId={chat.activeEmbedModelId ?? undefined}
+        />
+      </div>
+    );
+  }
+
+  if (appMode === "photos") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <PhotoLibrary
+          onBack={() => setAppMode("welcome")}
+          onCaption={analyzeOnce}
+          embedModelId={chat.activeEmbedModelId ?? undefined}
+        />
+      </div>
+    );
+  }
+
+  if (appMode === "inspection") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <FieldInspection
+          onBack={() => setAppMode("welcome")}
+          onReport={analyzeOnce}
+        />
+      </div>
+    );
+  }
+
+  if (appMode === "clinical") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <ClinicalNotes
+          onBack={() => setAppMode("welcome")}
+          embedModelId={chat.activeEmbedModelId ?? undefined}
+          onStructure={analyzeOnce}
+        />
+      </div>
+    );
+  }
+
+  if (appMode === "crop-disease") {
+    return (
+      <div className="app-shell" data-theme={theme}>
+        <CropDisease onBack={() => setAppMode("welcome")} />
+      </div>
+    );
+  }
+
   return (
     <div className="app-shell">
       {/* Mobile overlay — closes sidebar when tapping outside */}
       {sidebarOpen && (
         <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
       )}
-      <div className={`sidebar-wrap ${sidebarOpen ? "open" : ""}`}>
+      <div className={`sidebar-wrap ${sidebarOpen ? "open" : ""} ${sidebarCollapsed ? "collapsed" : ""}`}>
         <Sidebar
           section={section}
           onSectionChange={(s) => { setSection(s); setSidebarOpen(false); if (s !== "knowledge") setActiveKnowledgeSource(null); }}
@@ -623,6 +849,15 @@ export default function App() {
         />
       </div>
 
+      <button
+        className="sidebar-edge-btn"
+        onClick={() => setSidebarCollapsed((v) => !v)}
+        title={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+        aria-label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      >
+        {sidebarCollapsed ? "›" : "‹"}
+      </button>
+
       <main className="main-area">
         <button
           className="sidebar-hamburger"
@@ -632,17 +867,11 @@ export default function App() {
         >
           ☰
         </button>
-        <button
-          className="home-btn"
-          onClick={() => setAppMode("welcome")}
-          title="Back to home"
-          aria-label="Back to home"
-        >
-          ⌂
-        </button>
         <WebGpuBanner />
         <Toolbar
           embeddingStatus={chat.embeddingStatus}
+          navBackLabel="← Back"
+          onNavBack={section !== "conversations" ? () => setSection("conversations") : () => setAppMode("welcome")}
           llmBackend={chat.llmBackend}
           isWebLlmLoaded={chat.llmBackend === "mediapipe"}
           ragEnabled={chat.ragEnabled}
@@ -699,16 +928,6 @@ export default function App() {
         )}
         {ragDebugVisible && <RagDebugPanel chunks={chat.lastRagChunks} />}
 
-        {section !== "conversations" && (
-          <button
-            className="back-to-chat-btn"
-            onClick={() => setSection("conversations")}
-            aria-label="Back to chat"
-          >
-            ← Back
-          </button>
-        )}
-
         {section === "knowledge" ? (
           <KnowledgePanel
             embedded
@@ -738,14 +957,38 @@ export default function App() {
             onCreated={(agent) => setActiveEditAgentId(agent.id)}
             onDone={() => setSection("conversations")}
           />
-        ) : section === "settings" && chat.config ? (
-          <SettingsPanel
-            embedded
-            config={chat.config}
-            onSave={chat.updateConfig}
-            onClose={() => setSection("conversations")}
-          />
         ) : (
+          <>
+            {chat.availableModels.length > 0 && chat.activeConvId && (() => {
+              const activeConv = chat.conversations.find((c) => c.id === chat.activeConvId);
+              const currentPath = activeConv?.modelPath || chat.config?.lmModelPath || "";
+              return (
+                <div className="conv-model-bar">
+                  <span className="conv-model-label">Model:</span>
+                  <select
+                    className="conv-model-select"
+                    value={currentPath}
+                    onChange={(e) => chat.switchConversationModel(chat.activeConvId!, e.target.value || undefined)}
+                  >
+                    {chat.config?.lmModelPath && (
+                      <option value={chat.config.lmModelPath}>
+                        {chat.availableModels.find((m) => m.path === chat.config?.lmModelPath)?.name
+                          ?? chat.config.lmModelPath.split("/").pop()?.replace(/\.litertlm$/, "")}
+                        {" (default)"}
+                      </option>
+                    )}
+                    {chat.availableModels
+                      .filter((m) => m.path !== chat.config?.lmModelPath)
+                      .map((m) => (
+                        <option key={m.path} value={m.path}>{m.name}</option>
+                      ))}
+                  </select>
+                  {activeConv?.modelPath && activeConv.modelPath !== chat.config?.lmModelPath && (
+                    <span className="conv-model-override-badge">overridden</span>
+                  )}
+                </div>
+              );
+            })()}
           <ChatPane
             messages={chat.messages}
             streamingContent={chat.streamingContent}
@@ -771,6 +1014,7 @@ export default function App() {
             toolExecutions={chat.lastToolExecutions}
             streamingAgentName={chat.streamingAgentName}
           />
+          </>
         )}
       </main>
 
