@@ -36,6 +36,13 @@ export interface InferenceInput {
   modelId: string;
   /** One flat Float32 array per input tensor, in order. */
   inputs: number[][];
+  /**
+   * Optional element type per tensor: "float" (default) or "int32".
+   * "int8"/"uint8" send raw byte values (0-255 range, e.g. unprocessed pixel
+   * data) via writeInt8 on Android — required for models with quantized
+   * uint8 input tensors (e.g. MoveNet Lightning).
+   */
+  inputTypes?: ("float" | "int32" | "int8" | "uint8")[];
 }
 
 export interface InferenceOutput {
@@ -361,6 +368,33 @@ export async function createEmbedding(input: EmbeddingInput): Promise<EmbeddingO
     return invoke<EmbeddingOutput>("plugin:litert|create_embedding", { input });
   }
   return webCreateEmbedding(input);
+}
+
+// ---------------------------------------------------------------------------
+// Device capability detection
+// ---------------------------------------------------------------------------
+
+export interface AcceleratorSupport {
+  /** "npu" | "gpu" | "cpu" */
+  accelerator: Accelerator;
+  /** Vendor when NPU is supported: "Qualcomm" | "MediaTek" | "GoogleTensor" */
+  vendor?: string;
+}
+
+/**
+ * Query the best available LLM accelerator for this device.
+ *
+ * On Android: uses the SDK's built-in NpuCompatibilityChecker (Qualcomm
+ * Hexagon SM8550+, MediaTek Dimensity 8300/9200+, Google Tensor G3+) to
+ * detect NPU support at runtime — no hardcoded device list needed.
+ * On desktop: always returns "gpu".
+ * On web: always returns "cpu".
+ */
+export async function queryAcceleratorSupport(): Promise<AcceleratorSupport> {
+  if (isTauri()) {
+    return invoke<AcceleratorSupport>("plugin:litert|query_accelerator_support");
+  }
+  return { accelerator: "cpu" };
 }
 
 // ---------------------------------------------------------------------------

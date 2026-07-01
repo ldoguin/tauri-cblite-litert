@@ -121,9 +121,10 @@ export function executeQuery(
 export function createFtsIndex(
   collection: string,
   indexName: string,
-  field: string
+  field: string,
+  language = "en",
 ): Promise<void> {
-  return invoke("plugin:cblite|create_fts_index", { collection, indexName, field });
+  return invoke("plugin:cblite|create_fts_index", { collection, indexName, field, language });
 }
 
 export function listIndexes(collection: string): Promise<string[]> {
