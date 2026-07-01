@@ -1,0 +1,45 @@
+{
+  "logging": {
+    "console": {
+      "enabled": true,
+      "log_level": "info",
+      "log_keys": ["HTTP", "Replicate", "Sync"]
+    }
+  },
+  "databases": {
+    "sync_test": {
+      "server": "couchbase://couchbase",
+      "username": "admin",
+      "password": "password",
+      "bucket": "sync_test",
+      "enable_shared_bucket_access": true,
+      "num_index_replicas": 0,
+      "scopes": {
+        "_default": {
+          "collections": {
+            "photos": {
+              "sync": "function(doc, oldDoc) { channel('public'); }",
+              "import_filter": "function(doc) { return true; }"
+            },
+            "people": {
+              "sync": "function(doc, oldDoc) { channel('public'); }",
+              "import_filter": "function(doc) { return true; }"
+            },
+            "inspections": {
+              "sync": "function(doc, oldDoc) { channel('public'); }",
+              "import_filter": "function(doc) { return true; }"
+            },
+            "annotations": {
+              "sync": "function(doc, oldDoc) { channel('public'); }",
+              "import_filter": "function(doc) { return true; }"
+            },
+            "clinical": {
+              "sync": "function(doc, oldDoc) { channel('public'); }",
+              "import_filter": "function(doc) { return true; }"
+            }
+          }
+        }
+      }
+    }
+  }
+}

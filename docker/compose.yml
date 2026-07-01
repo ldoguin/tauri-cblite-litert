@@ -1,0 +1,54 @@
+services:
+  couchbase:
+    image: docker.io/couchbase/server:7.6.3
+    ports:
+      - "8091-8096:8091-8096"
+      - "11210:11210"
+    environment:
+      - CLUSTER_NAME=sync-test-cluster
+    volumes:
+      - cbs_data:/opt/couchbase/var
+    healthcheck:
+      test: ["CMD", "sh", "-c", "code=$(curl -so /dev/null -w '%{http_code}' http://localhost:8091/pools); [ \"$code\" -eq 200 ] || [ \"$code\" -eq 401 ]"]
+      interval: 5s
+      retries: 30
+      start_period: 20s
+
+  cbs-init:
+    image: docker.io/curlimages/curl:8.7.1
+    depends_on:
+      couchbase:
+        condition: service_healthy
+    volumes:
+      - ./init-cbs.sh:/init-cbs.sh
+    entrypoint: ["sh", "/init-cbs.sh"]
+    environment:
+      CBS_HOST: couchbase
+      CBS_USER: admin
+      CBS_PASS: password
+      CBS_BUCKET: sync_test
+
+  sync-gateway:
+    image: docker.io/couchbase/sync-gateway:4.0.5-enterprise
+    ports:
+      - "4984:4984"   # public API
+      - "4985:4985"   # admin API
+    depends_on:
+      cbs-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./sync-gateway-config.json:/etc/sync_gateway/config.json
+    command:
+      - "-bootstrap.use_tls_server=false"
+      - "-api.admin_interface=0.0.0.0:4985"
+      - "-api.admin_interface_authentication=false"
+      - "/etc/sync_gateway/config.json"
+    restart: on-failure
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4984"]
+      interval: 5s
+      retries: 30
+      start_period: 20s
+
+volumes:
+  cbs_data:

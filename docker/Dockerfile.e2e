@@ -1,0 +1,80 @@
+# Dockerfile.e2e — Headless e2e test runner for tauri-cblite-litert.
+#
+# Does NOT build the Rust/Tauri app — the binary bundle must be provided
+# at runtime via the TAURI_BINARY environment variable or a volume mount.
+#
+# Build:
+#   docker build -f docker/Dockerfile.e2e -t cblite-e2e .
+#
+# Run (CBS + SG must already be running and accessible via --network host):
+#   pnpm sync:up
+#   bash scripts/bundle-e2e.sh          # produces dist/e2e-bundle/
+#   docker run --rm \
+#     --network host \
+#     -e TAURI_BINARY=/bundle/tauri-cblite-litert \
+#     -v $(pwd)/dist/e2e-bundle:/bundle:ro \
+#     cblite-e2e
+#
+# The container image pins to ubuntu:24.04 to match the webkit2gtk version
+# the app binary was compiled against on the dev machine.
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── Runtime system packages ──────────────────────────────────────────────────
+# webkit2gtk-driver       → WebKitWebDriver (replaces tauri-driver; see wdio.conf.ts)
+# xvfb                    → virtual framebuffer for headless GTK/WebKit rendering
+# libvulkan1 + mesa-vulkan-drivers → software Vulkan (llvmpipe) for LiteRT GPU probe
+# All libXxx packages are transitive deps of webkit2gtk on Ubuntu 24.04
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    webkit2gtk-driver \
+    libwebkit2gtk-4.1-0 \
+    libgtk-3-0 \
+    libsoup-3.0-0 \
+    libjavascriptcoregtk-4.1-0 \
+    libglib2.0-0 \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    libpango-1.0-0 \
+    libfribidi0 \
+    libepoxy0 \
+    libfontconfig1 \
+    libxkbcommon0 \
+    libdbus-1-3 \
+    libx11-6 \
+    libxext6 \
+    libxrender1 \
+    xvfb \
+    libvulkan1 \
+    mesa-vulkan-drivers \
+    curl \
+    ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+# ── Node.js 22 + pnpm ────────────────────────────────────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+ && apt-get install -y --no-install-recommends nodejs \
+ && rm -rf /var/lib/apt/lists/* \
+ && npm install -g pnpm@latest
+
+# ── JS test dependencies ─────────────────────────────────────────────────────
+# Copy only what pnpm needs to resolve the workspace + test deps.
+# The compiled Rust binary is NOT built here — it's injected at runtime.
+WORKDIR /app
+
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY packages/ packages/
+COPY tests/ tests/
+COPY tsconfig.json tsconfig.e2e.json ./
+
+RUN pnpm install --frozen-lockfile
+
+# ── Entrypoint ───────────────────────────────────────────────────────────────
+# xvfb-run -a   picks a free :DPY automatically
+# -screen 0 1280x1024x24   matches what most GTK apps expect
+#
+# TAURI_BINARY must be set to the path of the bundled binary (via -e or a
+# wrapper script). The binary must reside in a volume that is mounted
+# into the container, e.g. -v $(pwd)/dist/e2e-bundle:/bundle:ro
+ENTRYPOINT ["xvfb-run", "-a", "--server-args=-screen 0 1280x1024x24", "pnpm", "test:e2e"]
