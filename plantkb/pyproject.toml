@@ -1,0 +1,21 @@
+[project]
+name = "agronomy-disease-pipeline"
+version = "0.1.0"
+description = "Deterministic disease profile pipeline for Couchbase Lite imports"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+llm = ["openai>=1.40"]
+
+[project.scripts]
+agronomy-pipeline = "agronomy_pipeline.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

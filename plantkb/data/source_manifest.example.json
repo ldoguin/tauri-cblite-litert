@@ -1,0 +1,9 @@
+[
+  {
+    "crop": "tomato",
+    "disease": "late blight",
+    "name": "USDA Extension Example",
+    "url": "https://example.usda.gov/tomato-late-blight",
+    "authority": "usda"
+  }
+]

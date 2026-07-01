@@ -1,0 +1,163 @@
+[
+  {
+    "crop": "apple",
+    "disease": "black rot",
+    "name": "Ohioline",
+    "url": "https://ohioline.osu.edu/factsheet/plpath-fru-07",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "apple",
+    "disease": "cedar rust",
+    "name": "NC State Extension",
+    "url": "https://content.ces.ncsu.edu/cedar-apple-rusts",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "cherry",
+    "disease": "powdery mildew",
+    "name": "UC IPM",
+    "url": "https://ipm.ucanr.edu/agriculture/cherry/powdery-mildew/",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "corn",
+    "disease": "cercospora leaf spot",
+    "name": "Crop Protection Network",
+    "url": "https://cropprotectionnetwork.org/encyclopedia/gray-leaf-spot-of-corn",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "corn",
+    "disease": "common rust",
+    "name": "Ohioline",
+    "url": "https://ohioline.osu.edu/factsheet/plpath-cer-02",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "corn",
+    "disease": "northern leaf blight",
+    "name": "Ohioline",
+    "url": "https://ohioline.osu.edu/factsheet/plpath-cer-10",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "grape",
+    "disease": "black rot",
+    "name": "Ohioline",
+    "url": "https://ohioline.osu.edu/factsheet/plpath-fru-24",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "grape",
+    "disease": "esca",
+    "name": "UC IPM",
+    "url": "https://ipm.ucanr.edu/agriculture/grape/esca-black-measles/",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "grape",
+    "disease": "leaf blight",
+    "name": "Wikipedia",
+    "url": "https://en.wikipedia.org/wiki/Isariopsis",
+    "authority": "unknown"
+  },
+  {
+    "crop": "orange",
+    "disease": "haunglongbing",
+    "name": "UF/IFAS EDIS",
+    "url": "https://edis.ifas.ufl.edu/publication/PP328",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "peach",
+    "disease": "bacterial spot",
+    "name": "Alabama Extension",
+    "url": "https://www.aces.edu/blog/topics/crop-production/bacterial-spot-treatment-in-peaches/",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "bell pepper",
+    "disease": "bacterial spot",
+    "name": "UF/IFAS EDIS",
+    "url": "https://edis.ifas.ufl.edu/publication/PP362",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "potato",
+    "disease": "late blight",
+    "name": "NC State Extension",
+    "url": "https://content.ces.ncsu.edu/potato-late-blight",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "squash",
+    "disease": "powdery mildew",
+    "name": "NC State Extension",
+    "url": "https://content.ces.ncsu.edu/cucurbit-powdery-mildew",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "strawberry",
+    "disease": "leaf scorch",
+    "name": "NC State Extension",
+    "url": "https://content.ces.ncsu.edu/leaf-scorch-of-strawberry",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "tomato",
+    "disease": "bacterial spot",
+    "name": "UF/IFAS EDIS",
+    "url": "https://edis.ifas.ufl.edu/publication/PP362",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "tomato",
+    "disease": "early blight",
+    "name": "NC State Extension",
+    "url": "https://content.ces.ncsu.edu/early-blight-of-tomato",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "tomato",
+    "disease": "leaf mold",
+    "name": "Utah State Extension",
+    "url": "https://extension.usu.edu/vegetableguide/tomato-pepper-eggplant/leaf-mold",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "tomato",
+    "disease": "septoria leaf spot",
+    "name": "NC State Extension",
+    "url": "https://content.ces.ncsu.edu/septoria-leaf-spot-of-tomato",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "tomato",
+    "disease": "spider mites",
+    "name": "NC State Extension",
+    "url": "https://content.ces.ncsu.edu/twospotted-spider-mite-3",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "tomato",
+    "disease": "target spot",
+    "name": "UF/IFAS EDIS",
+    "url": "https://edis.ifas.ufl.edu/publication/PP351",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "tomato",
+    "disease": "yellow leaf curl virus",
+    "name": "NC State Extension",
+    "url": "https://content.ces.ncsu.edu/tomato-yellow-leaf-curl-virus",
+    "authority": "university_extension"
+  },
+  {
+    "crop": "tomato",
+    "disease": "mosaic virus",
+    "name": "NC State Extension",
+    "url": "https://content.ces.ncsu.edu/tobamoviruses-that-affect-tomato-tmv-tomv-tobrfv",
+    "authority": "university_extension"
+  }
+]

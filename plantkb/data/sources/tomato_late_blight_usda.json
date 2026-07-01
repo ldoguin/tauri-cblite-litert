@@ -1,0 +1,10 @@
+{
+  "crop": "tomato",
+  "disease": "late blight",
+  "source": {
+    "name": "USDA Extension Example",
+    "url": "https://example.usda.gov/tomato-late-blight",
+    "authority": "usda"
+  },
+  "raw_text": "Tomato late blight is caused by Phytophthora infestans, an oomycete pathogen. Early symptoms: small dark water-soaked spots on leaves; pale green lesions that expand quickly. Late symptoms: brown lesions on stems; white sporulation on leaf undersides in wet weather. Conditions: 10 to 25 C, high humidity, wet leaves, cool weather. Environment: poor airflow; rain. The disease can be severe and rapidly destroy foliage. Organic treatment: copper. Chemical treatment: chlorothalonil. Prevention: remove volunteer tomato plants; avoid overhead irrigation; improve air circulation."
+}

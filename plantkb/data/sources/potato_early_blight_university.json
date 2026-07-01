@@ -1,0 +1,10 @@
+{
+  "crop": "potato",
+  "disease": "early blight",
+  "source": {
+    "name": "University Extension Example",
+    "url": "https://example.edu/potato-early-blight",
+    "authority": "university_extension"
+  },
+  "raw_text": "Potato early blight is caused by Alternaria solani, a fungal pathogen. Symptoms: brown leaf spots with concentric rings; yellowing around lesions. Conditions: 20 to 30 C, humid periods, wet foliage. The disease can reduce yield and is moderate to serious when plants are stressed. Chemical treatment: chlorothalonil. Prevention: rotate crops; remove infected debris; maintain plant vigor."
+}

@@ -1,0 +1,10 @@
+{
+  "crop": "apple",
+  "disease": "scab",
+  "source": {
+    "name": "FAO Example",
+    "url": "https://example.fao.org/apple-scab",
+    "authority": "fao"
+  },
+  "raw_text": "Apple scab is caused by Venturia inaequalis, a fungal pathogen. Early symptoms: olive-green spots on young leaves. Symptoms: dark scabby lesions on fruit; distorted leaves. Conditions: 12 to 24 C, wet leaves, rain, high humidity. Severity is high in susceptible cultivars during prolonged wet weather. Organic treatment: sulfur. Prevention: prune for airflow; remove fallen leaves; plant resistant cultivars."
+}

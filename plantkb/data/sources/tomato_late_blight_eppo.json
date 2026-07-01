@@ -1,0 +1,10 @@
+{
+  "crop": "tomato",
+  "disease": "late blight",
+  "source": {
+    "name": "EPPO Example",
+    "url": "https://example.eppo.int/tomato-late-blight",
+    "authority": "eppo"
+  },
+  "raw_text": "Pathogen: Phytophthora infestans. The organism is an oomycete associated with late blight of tomato. Symptoms: water-soaked leaf lesions; dark stem lesions. Conditions: 12-22 C and humid weather with leaf wetness. Prevention: use disease-free transplants; remove infected crop debris."
+}
