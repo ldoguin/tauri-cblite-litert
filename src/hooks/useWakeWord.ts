@@ -35,6 +35,22 @@ export interface UseWakeWordOptions {
   onError?: (msg: string) => void;
 }
 
+/** Human-readable diagnostic for common microphone / VAD failure modes. */
+function diagnoseMicError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err);
+  if (/not found|NotFoundError/i.test(msg))
+    return "No microphone found. Plug in a mic and try again.";
+  if (/denied|NotAllowedError/i.test(msg))
+    return "Microphone access denied. Allow mic permission in your OS/browser settings.";
+  if (/insecure|not allowed/i.test(msg))
+    return "Microphone requires a secure context. Run the app via 'tauri dev' or a production build.";
+  if (/AudioWorklet|worklet/i.test(msg))
+    return `VAD audio worklet failed to load: ${msg}. Ensure the app assets include vad.worklet.bundle.min.js.`;
+  if (/ort|onnx|wasm/i.test(msg))
+    return `ONNX Runtime failed: ${msg}. Try restarting the app.`;
+  return msg;
+}
+
 export interface UseWakeWordReturn {
   state: WakeWordState;
   /** Whether wake word detection is currently active. */
@@ -102,6 +118,16 @@ export function useWakeWord({
     setState("loading");
 
     try {
+      // 0. Pre-flight: check microphone is available before spending time
+      //    loading Whisper and the VAD model.
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error(
+          "getUserMedia not available. On Linux this requires GStreamer with PulseAudio/PipeWire support.",
+        );
+      }
+      const testStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      testStream.getTracks().forEach((t) => t.stop());
+
       // 1. Spawn a dedicated Whisper worker for wake phrase detection.
       const worker = new Worker(
         new URL("../workers/whisper.worker.ts", import.meta.url),
@@ -161,8 +187,16 @@ export function useWakeWord({
       const vad = await MicVAD.new({
         baseAssetPath: "/",
         onnxWASMBasePath: "/",
+        // Force single-threaded WASM so SharedArrayBuffer is not required.
+        // SharedArrayBuffer needs COOP+COEP HTTP headers which the Tauri
+        // production asset server doesn't set. Single-threaded ORT is
+        // sufficient for the lightweight Silero VAD model.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ortConfig: (ort: any) => {
+          ort.env.wasm.numThreads = 1;
+          ort.env.wasm.simd = true;
+        },
         onSpeechEnd: (audio: Float32Array) => {
-          // Forward 16 kHz mono PCM to the Whisper worker.
           console.log("[WakeWord] onSpeechEnd fired, audio samples:", audio.length, "duration:", (audio.length / 16000).toFixed(2) + "s");
           const copy = audio.slice();
           workerRef.current?.postMessage({ type: "transcribe", audio: copy }, [copy.buffer]);
@@ -175,8 +209,8 @@ export function useWakeWord({
       console.log("[WakeWord] VAD started, listening for phrase:", JSON.stringify(wakePhrase));
       setState("listening");
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      onErrorRef.current?.(msg);
+      console.error("[WakeWord] startup failed:", err);
+      onErrorRef.current?.(diagnoseMicError(err));
       setState("error");
       startingRef.current = false;
       await stop(true);
