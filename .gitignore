@@ -78,3 +78,10 @@ com/
 leafdieseasesplan.md
 bin/
 models
+
+# Large training datasets and raw model-training artifacts
+datasets/
+training/
+
+# Prebuilt .so staging area — populated by build.rs and scripts/stage-libcblite.sh
+src-tauri/bundle-libs/

@@ -1,5 +1,12 @@
 packages:
   - "packages/*"
+allowBuilds:
+  core-js: true
+  edgedriver: false
+  esbuild: true
+  geckodriver: false
+  protobufjs: true
+  sharp: true
 onlyBuiltDependencies:
   - esbuild
   - core-js
