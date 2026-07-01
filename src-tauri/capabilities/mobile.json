@@ -8,6 +8,7 @@
     "core:default",
     "os:default",
     "cblite:default",
-    "litert:default"
+    "litert:default",
+    "tts:default"
   ]
 }

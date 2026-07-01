@@ -22,7 +22,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' https://huggingface.co https://storage.googleapis.com https://en.wikipedia.org https://api.duckduckgo.com https://cdn.jsdelivr.net; worker-src 'self' blob:; font-src 'self' data:"
+      "csp": "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self'; img-src 'self' data: blob:; media-src 'self' blob:; connect-src 'self' data: blob: https://huggingface.co https://storage.googleapis.com https://en.wikipedia.org https://api.duckduckgo.com https://cdn.jsdelivr.net https://tfhub.dev https://www.kaggle.com https://raw.githubusercontent.com; worker-src 'self' blob:; font-src 'self' data:"
     }
   },
   "bundle": {
@@ -35,12 +35,31 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "resources/bundled-models/*.tflite": "bundled-models/"
+    },
     "iOS": {
       "developmentTeam": "",
       "minimumSystemVersion": "16.0"
     },
     "android": {
       "minSdkVersion": 24
+    },
+    "linux": {
+      "deb": {
+        "depends": ["fonts-noto-color-emoji"],
+        "postInstallScript": "deb-postinstall.sh",
+        "preRemoveScript": "deb-preremove.sh",
+        "files": {
+          "/usr/lib/tauri-cblite-litert/libspeechd-stub.so": "libspeechd-stub.so",
+          "/usr/lib/tauri-cblite-litert/libLiteRtLmC.so": "bundle-libs/libLiteRtLmC.so",
+          "/usr/lib/tauri-cblite-litert/libGemmaModelConstraintProvider.so": "bundle-libs/libGemmaModelConstraintProvider.so",
+          "/usr/lib/tauri-cblite-litert/libLiteRt.so": "bundle-libs/libLiteRt.so",
+          "/usr/lib/tauri-cblite-litert/libLiteRtWebGpuAccelerator.so": "bundle-libs/libLiteRtWebGpuAccelerator.so",
+          "/usr/lib/tauri-cblite-litert/libLiteRtTopKWebGpuSampler.so": "bundle-libs/libLiteRtTopKWebGpuSampler.so",
+          "/usr/lib/tauri-cblite-litert/libcblite.so.4": "bundle-libs/libcblite.so.4"
+        }
+      }
     }
   }
 }
