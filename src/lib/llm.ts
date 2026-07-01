@@ -16,8 +16,15 @@ import {
   unloadLmModel,
   loadModel,
   unloadModel,
+  queryAcceleratorSupport,
+  type Accelerator,
 } from "tauri-plugin-litert-api";
 import type { ModelConfig } from "./types";
+import {
+  resolveModelCapabilities,
+  type AppPlatform,
+  type ScannedModelMeta,
+} from "./modelCache";
 import {
   buildToolSystemPrompt,
   executeToolCalls,
@@ -29,6 +36,23 @@ import {
 
 export const LM_MODEL_ID = "rag-lm";
 export const EMBED_MODEL_ID = "rag-embed";
+
+// ── Platform detection ─────────────────────────────────────────────────────
+
+let _platform: AppPlatform | null = null;
+
+/** Returns the current runtime platform, cached after first call. */
+export async function getAppPlatform(): Promise<AppPlatform> {
+  if (_platform) return _platform;
+  if (!isTauri()) { _platform = "web"; return _platform; }
+  try {
+    const { platform } = await import("@tauri-apps/plugin-os");
+    _platform = (await platform()) === "android" ? "android" : "desktop";
+  } catch {
+    _platform = "desktop";
+  }
+  return _platform;
+}
 
 // ── Backend types ──────────────────────────────────────────────────────────
 
@@ -44,6 +68,7 @@ export interface ApiConfig {
 
 let apiConfig: ApiConfig | null = null;
 let activeLmModelId: string | null = null;
+let activeContextLength = 4096; // true context window of the loaded model
 let webLlm: LlmInference | null = null;
 let webLlmLoading = false;
 
@@ -51,6 +76,8 @@ export function setApiConfig(config: ApiConfig): void { apiConfig = config; }
 export function getApiConfig(): ApiConfig | null { return apiConfig; }
 export function setActiveLmModel(id: string | null): void { activeLmModelId = id; }
 export function getActiveLmModel(): string | null { return activeLmModelId; }
+export function setActiveContextLength(n: number): void { if (n > 0) activeContextLength = n; }
+export function getActiveContextLength(): number { return activeContextLength; }
 export function getWebLlm(): LlmInference | null { return webLlm; }
 export function isWebLlmLoading(): boolean { return webLlmLoading; }
 
@@ -67,32 +94,125 @@ export function getActiveBackend(): LlmBackend {
 
 // ── Model lifecycle ────────────────────────────────────────────────────────
 
-export async function loadModels(config: ModelConfig): Promise<void> {
+// Serialise loadModels calls — concurrent Engine::new invocations corrupt the
+// LiteRT-LM global accelerator registry causing create_conversation to return null.
+let _loadModelsPromise: Promise<void> | null = null;
+
+export async function loadModels(
+  config: ModelConfig,
+  scanned: ScannedModelMeta[] = [],
+): Promise<void> {
   // Both loadModel and loadLmModel are Tauri IPC calls — skip on web.
   if (!isTauri()) return;
-  if (config.embeddingModelPath) {
-    await loadModel({
-      modelId: EMBED_MODEL_ID,
-      modelPath: config.embeddingModelPath,
-      accelerator: config.accelerator,
-    });
-  }
-  if (config.lmModelPath) {
-    await loadLmModel({
-      modelId: LM_MODEL_ID,
-      modelPath: config.lmModelPath,
-      accelerator: config.accelerator,
-      maxTokens: config.maxTokens,
-      vision: true, // enable vision backend for multimodal models (Gemma 4 E2B/E4B)
-    });
-    setActiveLmModel(LM_MODEL_ID);
-  }
+  if (_loadModelsPromise) { await _loadModelsPromise; return; }
+  const run = async () => {
+    const platform = await getAppPlatform();
+
+    if (config.lmModelPath) {
+      const caps = resolveModelCapabilities(config.lmModelPath, platform, scanned);
+      // Skip embedding model when LLM requires GPU — shared thread-pool may crash.
+      const skipEmbedding = caps.requiredAccelerator === "gpu";
+      if (config.embeddingModelPath && !skipEmbedding) {
+        await loadModel({
+          modelId: EMBED_MODEL_ID,
+          modelPath: config.embeddingModelPath,
+          accelerator: "cpu",
+        });
+      }
+
+      let cacheDir: string | undefined;
+      try {
+        const { appLocalDataDir, join } = await import("@tauri-apps/api/path");
+        cacheDir = await join(await appLocalDataDir(), "litert-shader-cache");
+      } catch { /* non-Tauri build or path API unavailable */ }
+
+      // Resolve the effective accelerator:
+      // 1. Start from the model's required accelerator or the user's configured choice.
+      // 2. On Android, auto-upgrade GPU → NPU when the device SoC is supported
+      //    (Qualcomm Hexagon, MediaTek APU, or Google Tensor NPU).
+      let accelerator: Accelerator =
+        caps.requiredAccelerator !== "cpu" ? caps.requiredAccelerator : config.accelerator;
+      if (platform === "android" && accelerator === "gpu") {
+        try {
+          const support = await queryAcceleratorSupport();
+          if (support.accelerator === "npu") {
+            accelerator = "npu";
+            console.log(`[llm] NPU available (${support.vendor}) — upgrading from GPU`);
+          }
+        } catch { /* leave accelerator as-is on any error */ }
+      }
+
+      await loadLmModel({
+        modelId: LM_MODEL_ID,
+        modelPath: config.lmModelPath,
+        accelerator,
+        // contextLength 0 means "unknown" — omit so the library uses its compiled-in default.
+        maxTokens: caps.contextLength || undefined,
+        vision: caps.supportsVision,
+        cacheDir,
+      });
+      setActiveLmModel(LM_MODEL_ID);
+      setActiveContextLength(caps.contextLength || 4096);
+    } else if (config.embeddingModelPath) {
+      await loadModel({
+        modelId: EMBED_MODEL_ID,
+        modelPath: config.embeddingModelPath,
+        accelerator: "cpu",
+      });
+    }
+  };
+  _loadModelsPromise = run();
+  try { await _loadModelsPromise; }
+  finally { _loadModelsPromise = null; }
 }
 
 export async function unloadModels(): Promise<void> {
   try { await unloadModel(EMBED_MODEL_ID); } catch { /* not loaded */ }
   try { await unloadLmModel(LM_MODEL_ID); } catch { /* not loaded */ }
   setActiveLmModel(null);
+}
+
+/** Load a .litertlm model from a local absolute path (Tauri desktop only). */
+export async function loadLmFromPath(
+  modelPath: string,
+  opts?: { accelerator?: Accelerator; scanned?: ScannedModelMeta[] },
+): Promise<void> {
+  if (!isTauri()) throw new Error("loadLmFromPath requires Tauri");
+  const platform = await getAppPlatform();
+  const caps = resolveModelCapabilities(modelPath, platform, opts?.scanned ?? []);
+
+  let cacheDir: string | undefined;
+  try {
+    const { appLocalDataDir, join } = await import("@tauri-apps/api/path");
+    cacheDir = await join(await appLocalDataDir(), "litert-shader-cache");
+  } catch { /* non-Tauri build */ }
+
+  let accelerator: Accelerator =
+    caps.requiredAccelerator !== "cpu" ? caps.requiredAccelerator : (opts?.accelerator ?? "cpu");
+  if (platform === "android" && accelerator === "gpu") {
+    try {
+      const support = await queryAcceleratorSupport();
+      if (support.accelerator === "npu") accelerator = "npu";
+    } catch { /* leave as-is */ }
+  }
+
+  await loadLmModel({
+    modelId: LM_MODEL_ID,
+    modelPath,
+    accelerator,
+    maxTokens: caps.contextLength || undefined,
+    vision: caps.supportsVision,
+    cacheDir,
+  });
+  setActiveLmModel(LM_MODEL_ID);
+  setActiveContextLength(caps.contextLength || 4096);
+}
+
+/** Scan a folder for .litertlm files. Returns [{name, path}] sorted by name. */
+export async function scanModels(folder: string): Promise<Array<{ name: string; path: string }>> {
+  if (!isTauri() || !folder) return [];
+  const { invoke } = await import("@tauri-apps/api/core");
+  return invoke<Array<{ name: string; path: string }>>("scan_models", { folder });
 }
 
 // ── MediaPipe web LLM ──────────────────────────────────────────────────────
@@ -179,6 +299,17 @@ export interface GenerateOptions {
 const MAX_REACT_ITERATIONS = 5;
 
 /**
+ * Remove <think>…</think> reasoning blocks emitted by models like DeepSeek-R1
+ * and Qwen3. Both complete blocks and unclosed trailing blocks are stripped.
+ */
+export function stripThinking(text: string): string {
+  return text
+    .replace(/<think>[\s\S]*?<\/think>/gi, "")
+    .replace(/<think>[\s\S]*/gi, "")
+    .trimStart();
+}
+
+/**
  * Run a single non-streaming LLM call and return the full text response.
  * Intended for internal tasks (e.g. routing decisions) that should not be
  * shown in the UI. Uses no tools, no RAG context, and no conversation history.
@@ -208,7 +339,7 @@ export async function generateOnce(
       },
     ).catch((e) => { if (!rejected) { rejected = true; reject(e); } });
   });
-  return result;
+  return stripThinking(result);
 }
 
 /**
@@ -445,16 +576,26 @@ async function generateViaTauri(
       return;
     }
 
-    // Truncate history to fit within the model's token budget.
-    // Reserve 25% of maxTokens for output; estimate 4 chars/token for input.
-    const fittedMessages = truncateToFitTokens(messages, opts.config.maxTokens);
+    // Truncate history to fit within the model's context window.
+    // Use the known context length of the loaded model; fall back to 4096.
+    const fittedMessages = truncateToFitTokens(messages, activeContextLength);
 
-    const prompt = fittedMessages
+    const systemContent = fittedMessages.find((m) => m.role === "system")?.content;
+
+    const conversationText = fittedMessages
       .filter((m) => m.role !== "system")
       .map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`)
       .join("\n") + "\nAssistant:";
 
-    const systemInstruction = fittedMessages.find((m) => m.role === "system")?.content;
+    // Embed the system instruction (which includes RAG context) directly in the
+    // prompt so the model definitely sees it. The LiteRT-LM conversation API's
+    // system_message_json parameter requires an undocumented JSON format that
+    // doesn't reliably reach the model, so we prepend it as plain text instead.
+    const prompt = systemContent
+      ? `${systemContent}\n\n${conversationText}`
+      : conversationText;
+
+    const systemInstruction = undefined;
 
     // Extract raw base64 bytes from the data URL for the plugin's image input
     const imageBase64 = opts.imageDataUrl
@@ -475,6 +616,7 @@ async function generateViaTauri(
             temperature: opts.config.temperature,
             topP: opts.config.topP,
             topK: opts.config.topK,
+            maxOutputTokens: opts.config.maxTokens,
           },
         },
       },
@@ -724,20 +866,34 @@ async function generateMock(
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
+// Maximum chars for a single tool result injected into the prompt.
+// Prevents one large fetch_url or knowledge_search result from filling the context.
+const MAX_TOOL_RESULT_CHARS = 4000;
+
 /**
  * Drop oldest non-system messages until the flattened prompt fits within the
- * model's token budget (estimated at 4 chars/token, reserving 25% for output).
+ * model's context window (estimated at 3 chars/token — conservative for BPE
+ * tokenisers on English text — reserving 30% for output tokens).
  * Always keeps at least the system message + the last user turn.
  */
 function truncateToFitTokens(
   messages: Array<{ role: string; content: string }>,
-  maxTokens: number,
+  contextWindow: number,
 ): Array<{ role: string; content: string }> {
-  const CHARS_PER_TOKEN = 4;
-  const maxInputChars = Math.floor(maxTokens * 0.75) * CHARS_PER_TOKEN;
+  const CHARS_PER_TOKEN = 3; // conservative: BPE English averages ~3 chars/token
+  const maxInputTokens = Math.floor(contextWindow * 0.70);
+  const maxInputChars = maxInputTokens * CHARS_PER_TOKEN;
 
   const system = messages.filter((m) => m.role === "system");
   let history = messages.filter((m) => m.role !== "system");
+
+  // Cap any individual tool-result block to prevent one response from filling the window.
+  history = history.map((m) => {
+    if (m.role === "user" && m.content.startsWith("<tool_results>") && m.content.length > MAX_TOOL_RESULT_CHARS) {
+      return { ...m, content: m.content.slice(0, MAX_TOOL_RESULT_CHARS) + "\n…[truncated]</tool_results>" };
+    }
+    return m;
+  });
 
   const promptLen = (msgs: Array<{ role: string; content: string }>) =>
     msgs.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`).join("\n").length +
@@ -831,4 +987,75 @@ export function persistApiConfig(config: ApiConfig): void {
 export function redactApiKey(key: string | undefined): string {
   if (!key || key.length < 8) return key ? "••••••••" : "";
   return `${key.slice(0, 4)}...${key.slice(-4)}`;
+}
+
+// ── Local LLM discovery ────────────────────────────────────────────────────
+
+export interface LocalLlmServer {
+  name: string;
+  baseUrl: string;
+  models: string[];
+}
+
+// Well-known local LLM servers, each with its own model-list endpoint.
+// All expose (or will expose) an OpenAI-compatible /v1/chat/completions.
+const LOCAL_PROVIDERS: Array<{
+  name: string;
+  baseUrl: string;
+  modelsUrl: string;
+  parseModels: (data: unknown) => string[];
+}> = [
+  {
+    name: "Ollama",
+    baseUrl: "http://localhost:11434/v1",
+    // Ollama's own /api/tags returns { models: [{ name, ... }] }
+    modelsUrl: "http://localhost:11434/api/tags",
+    parseModels: (d) => ((d as { models?: { name: string }[] }).models ?? []).map((m) => m.name),
+  },
+  {
+    name: "LM Studio",
+    baseUrl: "http://localhost:1234/v1",
+    modelsUrl: "http://localhost:1234/v1/models",
+    parseModels: (d) => ((d as { data?: { id: string }[] }).data ?? []).map((m) => m.id),
+  },
+  {
+    name: "llama.cpp",
+    baseUrl: "http://127.0.0.1:8080/v1",
+    modelsUrl: "http://127.0.0.1:8080/v1/models",
+    parseModels: (d) => ((d as { data?: { id: string }[] }).data ?? []).map((m) => m.id),
+  },
+  {
+    name: "Jan",
+    baseUrl: "http://localhost:1337/v1",
+    modelsUrl: "http://localhost:1337/v1/models",
+    parseModels: (d) => ((d as { data?: { id: string }[] }).data ?? []).map((m) => m.id),
+  },
+];
+
+/**
+ * Probe well-known local ports for running LLM servers and return those that
+ * respond with at least one available model. Times out each probe after 2 s.
+ */
+export async function fetchLocalLlms(): Promise<LocalLlmServer[]> {
+  const results: LocalLlmServer[] = [];
+  await Promise.all(
+    LOCAL_PROVIDERS.map(async (p) => {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2000);
+      try {
+        const res = await fetch(p.modelsUrl, { signal: controller.signal });
+        if (!res.ok) return;
+        const data: unknown = await res.json();
+        const models = p.parseModels(data);
+        if (models.length > 0) {
+          results.push({ name: p.name, baseUrl: p.baseUrl, models });
+        }
+      } catch {
+        // server not running or CORS block — skip
+      } finally {
+        clearTimeout(timer);
+      }
+    }),
+  );
+  return results;
 }

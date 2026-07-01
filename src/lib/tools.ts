@@ -361,27 +361,55 @@ async function searchViaDDG(
     return "Search unavailable: DuckDuckGo returned a bot challenge. Configure a SearXNG instance in Settings for reliable search.";
   }
 
-  const titleRe = /<a[^>]+class="result-link"[^>]+href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  // DDG Lite puts href before OR after class — match both orderings.
+  // Also handle uddg= redirect links which wrap the real URL.
+  const linkRe =
+    /<a\s[^>]*?(?:class="result-link"[^>]*?href="([^"]*?)"|href="([^"]*?)"[^>]*?class="result-link")[^>]*?>([\s\S]*?)<\/a>/gi;
   const snippetRe = /<td[^>]+class="result-snippet"[^>]*>([\s\S]*?)<\/td>/gi;
+
   const titles: Array<{ title: string; url: string }> = [];
   let m: RegExpExecArray | null;
-  while ((m = titleRe.exec(html)) !== null) {
-    const href = m[1];
-    const title = m[2].replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&gt;/g, ">").replace(/&lt;/g, "<").trim();
+  while ((m = linkRe.exec(html)) !== null) {
+    const href = m[1] ?? m[2];
+    const rawTitle = m[3].replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").replace(/&gt;/g, ">").replace(/&lt;/g, "<").trim();
+    if (!href || !rawTitle) continue;
     let resolvedUrl = href;
     try {
       const uddg = new URL("https://lite.duckduckgo.com" + href).searchParams.get("uddg");
       if (uddg) resolvedUrl = decodeURIComponent(uddg);
-    } catch { /* keep href */ }
-    titles.push({ title, url: resolvedUrl });
+    } catch { /* keep href as-is */ }
+    titles.push({ title: rawTitle, url: resolvedUrl });
   }
+
+  // Fallback: grab any anchor whose href contains "uddg=" (handles relative,
+  // protocol-relative, and full DDG redirect URLs, plus &amp; encoding).
+  if (titles.length === 0) {
+    console.debug("[DDG] class regex found 0 links; raw HTML head:", html.slice(0, 2000));
+    const uddgRe = /href="([^"]*uddg=[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+    while ((m = uddgRe.exec(html)) !== null) {
+      const raw = m[1].replace(/&amp;/g, "&");
+      const rawTitle = m[2].replace(/<[^>]+>/g, "").replace(/&amp;/g, "&").trim();
+      if (!rawTitle) continue;
+      let resolvedUrl = raw;
+      try {
+        const base = raw.startsWith("http") ? raw : "https://lite.duckduckgo.com" + raw;
+        const uddg = new URL(base).searchParams.get("uddg");
+        if (uddg) resolvedUrl = decodeURIComponent(uddg);
+      } catch { /* keep raw */ }
+      titles.push({ title: rawTitle, url: resolvedUrl });
+    }
+  }
+
   const snippets: string[] = [];
   while ((m = snippetRe.exec(html)) !== null) {
     snippets.push(m[1].replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
   }
 
   const results = titles.slice(0, limit).map((t, i) => ({ ...t, snippet: snippets[i] ?? "" }));
-  if (results.length === 0) return `No results found for "${query}". Try rephrasing.`;
+  if (results.length === 0) {
+    console.debug("[DDG] 0 results; full HTML length:", html.length, "head:", html.slice(0, 2000));
+    return `No results found for "${query}". Try rephrasing.`;
+  }
   return results.map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet}\n${r.url}`).join("\n\n");
 }
 
@@ -395,8 +423,8 @@ export function createWebSearchTool(searxngUrl?: string): Tool {
     id: "web_search",
     name: "Web Search",
     description:
-      "Searches the web. Use this for any question about people, " +
-      "current events, recent news, or facts you are unsure about. No API key required.",
+      "Searches the web. Use this for questions about people, current events, recent news, or facts you are unsure about. " +
+      "Do NOT use for weather — use the weather tool instead. No API key required.",
     requiresNetwork: true,
     params: [
       { name: "query", type: "string", description: "The search query", required: true },
@@ -525,6 +553,7 @@ import { fetchUrlTool }       from "./skills/fetch-url";
 import { weatherTool }        from "./skills/weather";
 import { exchangeRatesTool }  from "./skills/exchange-rates";
 import { hackerNewsTool }     from "./skills/hacker-news";
+import { createTaskModelTools } from "./skills/task-models";
 
 export { createSourceTools } from "./skills/source-tools";
 export type { SourceToolDeps } from "./skills/source-tools";
@@ -697,6 +726,8 @@ export const ALL_TOOLS: Tool[] = [
   hackerNewsTool,
   // Network tools — Tauri only (need Rust fetch_url to bypass CORS)
   ...(isTauri() ? [fetchUrlTool, createWebSearchTool()] : []),
+  // On-device vision tools — Tauri only (need get_model_path + litert inference)
+  ...(isTauri() ? createTaskModelTools() : []),
 ];
 
 export function getToolById(id: string): Tool | undefined {

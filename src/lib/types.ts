@@ -49,7 +49,12 @@ export interface Conversation {
   updatedAt: string;
   /** System instruction used for this conversation */
   systemInstruction?: string;
+  /** Override LM model path for this conversation; undefined = use global config */
+  modelPath?: string;
 }
+
+/** A .litertlm file discovered in the model folder. Re-exported from modelCache. */
+export type { ScannedModelMeta as ScannedModel } from "./modelCache";
 
 /** A chunk of text stored in the knowledge base, with its embedding vector. */
 export interface KnowledgeChunk {
@@ -72,6 +77,258 @@ export interface KnowledgeChunk {
  * Selecting an agent sets the system instruction for all new messages
  * in the active conversation.
  */
+// ── Dataset Annotation ─────────────────────────────────────────────────────
+
+export interface AnnotationBox {
+  id: string;
+  label: string;
+  x1: number; y1: number; x2: number; y2: number; // normalized [0-1]
+  source: "human" | "model";
+  annotatorId: string;
+}
+
+export type AnnotationStatus = "unannotated" | "in-progress" | "done" | "review";
+
+export interface AnnotationRecord {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  imageRef: string;
+  thumb: string;
+  labels: string[];        // unique label names from boxes — FTS field
+  embedding: number[];     // caption embedding for vector similarity
+  boxes: AnnotationBox[];
+  status: AnnotationStatus;
+  annotatorId: string;     // last editor
+  synced: boolean;
+}
+
+// ── Photo Library ───────────────────────────────────────────────────────────
+
+export interface FaceEntry {
+  id: string;
+  x1: number; y1: number; x2: number; y2: number; // normalized BlazeFace box
+  thumb: string;       // base64 64×64 JPEG face crop
+  embedding: number[]; // 1024-dim grayscale pixel vector (32×32) for similarity
+  personId: string | null;
+  personName: string | null;
+}
+
+export interface PersonRecord {
+  id: string;
+  name: string;
+  faceThumb: string; // representative face crop
+  createdAt: string;
+}
+
+export interface PhotoDoc {
+  id: string;
+  createdAt: string;
+  caption: string;
+  labels: string[];
+  scores: number[];
+  embedding: number[];
+  photoRef: string;
+  thumb: string;
+  faces: FaceEntry[];  // BlazeFace detections with pixel embeddings
+  synced: boolean;
+}
+
+// ── Sync ───────────────────────────────────────────────────────────────────
+
+export interface SyncConfig {
+  url: string;
+  username: string;
+  password: string;
+  direction: "push" | "pull" | "both";
+  continuous: boolean;
+  lastSyncedAt: string | null;
+}
+
+export const DEFAULT_SYNC_CONFIG: SyncConfig = {
+  url: "", username: "", password: "",
+  direction: "both", continuous: false, lastSyncedAt: null,
+};
+
+// ── Clinical Notes ─────────────────────────────────────────────────────────
+
+export type ClinicalNoteType =
+  | "admission" | "progress" | "wound" | "procedure" | "discharge";
+
+export interface SoapNote {
+  subjective: string;
+  objective: string;
+  assessment: string;
+  plan: string;
+}
+
+export interface ClinicalNote {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  patientRef: string;    // anonymised identifier, e.g. "PT-2024-0042"
+  encounter: string;     // ward/room/clinic
+  noteType: ClinicalNoteType;
+  rawNotes: string;      // FLE-encrypted field
+  photoRef: string;      // FLE-encrypted field; cbl-blob ref or data URL; "" if none
+  soapJson: string;      // FLE-encrypted field; JSON-serialised SoapNote or ""
+  soap: SoapNote | null; // runtime only — derived from soapJson, not stored directly
+  embedding: number[];   // for vector similarity search
+  synced: boolean;
+}
+
+// ── Field Inspection ────────────────────────────────────────────────────────
+
+export type InspectionSeverity = "ok" | "low" | "medium" | "high" | "critical";
+export type InspectionCategory =
+  | "structural" | "electrical" | "mechanical" | "safety" | "environmental" | "other";
+
+export interface InspectionRecord {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  location: string;
+  assetId: string;
+  category: InspectionCategory;
+  severity: InspectionSeverity;
+  notes: string;
+  photoRef: string;       // cbl-blob ref or data URL
+  detections: Array<{ label: string; score: number }>;
+  aiReport: string;
+  synced: boolean;
+}
+
+export type CropType = "tomato" | "potato" | "apple" | "corn" | "grape" | "other";
+
+export interface LeafResult {
+  /** Normalised [0-1] bounding box from Stage 1 detector */
+  box: { y1: number; x1: number; y2: number; x2: number };
+  leafConfidence: number;
+  /** Plant species identified by marginalising over all 38 disease classes, e.g. "Tomato" */
+  plant: string;
+  /** P(plant) = sum of softmax scores for all classes of that plant */
+  plantConfidence: number;
+  /** Empty string when disease classifier model is absent */
+  disease: string;
+  /** P(disease | plant) = raw class score / P(plant) */
+  diseaseConfidence: number;
+}
+
+export interface CropDiseaseRecord {
+  id: string;
+  createdAt: string;
+  updatedAt: string;
+  photoRef: string;
+  cropType: CropType;
+  location: string;
+  notes: string;
+  leaves: LeafResult[];
+  synced: boolean;
+}
+
+// ── Disease knowledge base (seeded from plantkb/build/couchbase) ──────────────
+//
+// Reference documents, not user data: produced offline by the plantkb pipeline
+// (see plantkb/README.md) and loaded read-only via seedDiseaseKbIfEmpty(). Shape
+// mirrors plantkb/src/agronomy_pipeline/models.py's empty_disease_profile /
+// empty_healthy_profile builders exactly — keep the two in sync.
+
+export interface DiseaseEvidence {
+  source_name: string;
+  source_url: string;
+  quote: string;
+  field: string;
+}
+
+export interface DiseaseValueFact<T> {
+  value: T;
+  evidence: DiseaseEvidence[];
+}
+
+export interface DiseaseTextFact {
+  description: string;
+  evidence: DiseaseEvidence[];
+}
+
+export interface DiseaseSymptomFact {
+  stage: string;
+  description: string;
+  evidence: DiseaseEvidence[];
+}
+
+export interface DiseaseTreatmentFact {
+  name: string;
+  evidence: DiseaseEvidence[];
+  regions: string[];
+}
+
+export interface DiseaseSourceRef {
+  name: string;
+  url: string;
+}
+
+export interface DiseaseReview {
+  status: "machine_generated" | "needs_review" | "expert_reviewed" | "rejected";
+  reviewed_by: string | null;
+  reviewed_at: string | null;
+}
+
+export interface DiseaseConflict {
+  field: string;
+  values: string[];
+  sources: string[];
+  resolution: string;
+}
+
+export interface DiseaseProfile {
+  type: "disease_profile";
+  id: string;
+  version: number;
+  crop: string;
+  disease: string;
+  taxonomy: {
+    pathogen_type: DiseaseValueFact<string>;
+    scientific_name: DiseaseValueFact<string>;
+  };
+  symptoms: DiseaseSymptomFact[];
+  conditions: {
+    temperature_c: DiseaseValueFact<number[]>;
+    humidity: DiseaseValueFact<string>;
+    environment: DiseaseTextFact[];
+  };
+  severity: DiseaseValueFact<string>;
+  treatment: {
+    organic: DiseaseTreatmentFact[];
+    chemical: DiseaseTreatmentFact[];
+    cultural: DiseaseTreatmentFact[];
+  };
+  prevention: DiseaseTextFact[];
+  images: string[];
+  sources: DiseaseSourceRef[];
+  confidence: { taxonomy: number; symptoms: number; conditions: number; treatment: number; prevention: number; overall: number };
+  conflicts: DiseaseConflict[];
+  review: DiseaseReview;
+  /** Synthesized at seed time (crop + disease + symptoms + treatment text) for FTS search. */
+  searchText?: string;
+}
+
+export interface HealthyProfile {
+  type: "healthy_profile";
+  id: string;
+  version: number;
+  crop: string;
+  class: "healthy";
+  visual_traits: DiseaseTextFact[];
+  common_false_positives: DiseaseTextFact[];
+  images: string[];
+  sources: DiseaseSourceRef[];
+  confidence: { visual_traits: number; false_positives: number; overall: number };
+  review: DiseaseReview;
+  searchText?: string;
+}
+
+export type DiseaseKbDoc = DiseaseProfile | HealthyProfile;
+
 export interface Agent {
   id: string;
   name: string;
@@ -121,6 +378,8 @@ export interface ModelConfig {
   wakePhrase: string;
   /** HuggingFace model ID for TTS synthesis. Defaults to Xenova/mms-tts-eng when empty. */
   ttsModelId: string;
+  /** BCP-47 language code used for FTS stemming (e.g. "en", "fr", "de"). Default "en". */
+  ftsLanguage: string;
   /** Characters per chunk when splitting documents for embedding (default 400) */
   chunkSize: number;
   /** Overlap between consecutive chunks in characters (default 80) */
@@ -135,12 +394,14 @@ export interface ModelConfig {
    * Leave empty to use the built-in DuckDuckGo fallback.
    */
   searxngUrl: string;
+  /** Folder path scanned for .litertlm model files */
+  modelFolder: string;
 }
 
 export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   lmModelPath: "",
   embeddingModelPath: "",
-  accelerator: "cpu",
+  accelerator: "gpu",
   maxTokens: 4096,
   contextLength: 0,
   ragThreshold: 0.3,
@@ -149,6 +410,7 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   whisperModelId: "",
   wakePhrase: "jarvis",
   ttsModelId: "",
+  ftsLanguage: "en",
   temperature: 0.8,
   topP: 0.95,
   topK: 40,
@@ -157,6 +419,7 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   chunkOverlap: 80,
   hybridBm25Weight: 0.3,
   searxngUrl: "",
+  modelFolder: "",
 };
 
 export interface Product {

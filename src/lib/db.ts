@@ -15,8 +15,16 @@ import type {
   ModelConfig,
   Agent,
   Product,
+  InspectionRecord,
+  ClinicalNote,
+  PhotoDoc,
+  PersonRecord,
+  AnnotationRecord,
+  SyncConfig,
+  CropDiseaseRecord,
+  DiseaseKbDoc,
 } from "./types";
-import { DEFAULT_MODEL_CONFIG } from "./types";
+import { DEFAULT_MODEL_CONFIG, DEFAULT_SYNC_CONFIG } from "./types";
 
 export function isTauri(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
@@ -29,6 +37,22 @@ const COL_CONFIG        = "_default.config";
 const COL_AGENTS        = "_default.agents";
 const COL_PDFS          = "_default.pdfs";
 const COL_PRODUCTS      = "_default.products";
+const COL_INSPECTIONS   = "_default.inspections";
+const COL_CLINICAL      = "_default.clinical";
+const COL_PHOTOS        = "_default.photos";
+const COL_PEOPLE        = "_default.people";
+const COL_ANNOTATIONS   = "_default.annotations";
+const COL_SYNC          = "_default.sync_config";
+const COL_CROP_DISEASE  = "_default.crop_disease";
+const COL_DISEASE_KB    = "_default.disease_kb";
+
+export const SYNC_COLLECTIONS = {
+  photos:       { primary: COL_PHOTOS,       extra: [COL_PEOPLE] },
+  inspections:  { primary: COL_INSPECTIONS,  extra: [] },
+  annotations:  { primary: COL_ANNOTATIONS,  extra: [] },
+  clinical:     { primary: COL_CLINICAL,     extra: [] },
+  cropDisease:  { primary: COL_CROP_DISEASE, extra: [] },
+} as const;
 
 // ── Blob storage ───────────────────────────────────────────────────────────
 //
@@ -193,7 +217,7 @@ export async function resetProductCatalog(): Promise<void> {
 
 // ── Lifecycle ──────────────────────────────────────────────────────────────
 
-export async function initDatabase(dbDir: string): Promise<void> {
+export async function initDatabase(dbDir: string, ftsLanguage = "en"): Promise<void> {
   if (!isTauri()) {
     webStore.load();
     await runMigrations();
@@ -201,18 +225,24 @@ export async function initDatabase(dbDir: string): Promise<void> {
   }
   const { openDatabase, createFtsIndex } = await import("tauri-plugin-cblite");
   await openDatabase(dbDir, "rag-chatbot", undefined, [
-    COL_CONVERSATIONS, COL_MESSAGES, COL_KNOWLEDGE, COL_CONFIG, COL_AGENTS, COL_PDFS, COL_PRODUCTS,
+    COL_CONVERSATIONS, COL_MESSAGES, COL_KNOWLEDGE, COL_CONFIG, COL_AGENTS, COL_PDFS, COL_PRODUCTS, COL_INSPECTIONS, COL_CLINICAL, COL_PHOTOS, COL_PEOPLE, COL_ANNOTATIONS, COL_SYNC, COL_CROP_DISEASE, COL_DISEASE_KB,
   ]);
   // Create FTS indexes. Failures are logged but don't abort init.
   // Products FTS: index `name` only — CBL Android CE rejects multi-field FullTextIndexConfiguration.
   const { listIndexes } = await import("tauri-plugin-cblite");
   for (const [col, name, field] of [
-    [COL_KNOWLEDGE, "knowledgeFts", "text"],
-    [COL_MESSAGES,  "messagesFts",  "content"],
-    [COL_PRODUCTS,  "productsFts",  "name"],
+    [COL_KNOWLEDGE,   "knowledgeFts",   "text"],
+    [COL_MESSAGES,    "messagesFts",    "content"],
+    [COL_PRODUCTS,    "productsFts",    "name"],
+    [COL_INSPECTIONS, "inspectionsFts", "notes"],
+    [COL_CLINICAL,    "clinicalFts",    "rawNotes"],
+    [COL_PHOTOS,      "photosFts",      "caption"],
+    [COL_ANNOTATIONS,  "annotationsFts",  "labels"],
+    [COL_CROP_DISEASE, "cropDiseaseFts",  "notes"],
+    [COL_DISEASE_KB,   "diseaseKbFts",    "searchText"],
   ] as Array<[string, string, string]>) {
     try {
-      await createFtsIndex(col, name, field);
+      await createFtsIndex(col, name, field, ftsLanguage);
       dispatchDbProgress(`FTS ${name}: ✓ created`);
     } catch (e) {
       dispatchDbProgress(`FTS ${name} FAILED: ${String(e)}`);
@@ -227,6 +257,7 @@ export async function initDatabase(dbDir: string): Promise<void> {
   }
   await runMigrations();
   await seedProductsIfEmpty();
+  await seedDiseaseKbIfEmpty();
 }
 
 export async function shutdownDatabase(): Promise<void> {
@@ -282,6 +313,23 @@ export async function saveConfig(config: ModelConfig): Promise<void> {
   await saveDocument(COL_CONFIG, "app-config", config as unknown as Record<string, unknown>);
 }
 
+// ── Sync config ────────────────────────────────────────────────────────────
+
+export async function loadSyncConfig(): Promise<SyncConfig> {
+  if (!isTauri()) return { ...DEFAULT_SYNC_CONFIG };
+  const { getDocument } = await import("tauri-plugin-cblite");
+  const doc = await getDocument(COL_SYNC, "sync-config").catch(() => null);
+  if (!doc) return { ...DEFAULT_SYNC_CONFIG };
+  const { _id: _unused, ...rest } = doc as Record<string, unknown>;
+  return { ...DEFAULT_SYNC_CONFIG, ...(rest as Partial<SyncConfig>) };
+}
+
+export async function saveSyncConfig(config: SyncConfig): Promise<void> {
+  if (!isTauri()) return;
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_SYNC, "sync-config", config as unknown as Record<string, unknown>);
+}
+
 // ── Conversations ──────────────────────────────────────────────────────────
 
 export async function listConversations(limit = 200, offset = 0): Promise<Conversation[]> {
@@ -294,7 +342,7 @@ export async function listConversations(limit = 200, offset = 0): Promise<Conver
   const { executeQuery } = await import("tauri-plugin-cblite");
   const rows = await executeQuery(
     "N1QL",
-    `SELECT META().id AS id, title, createdAt, updatedAt, systemInstruction
+    `SELECT META().id AS id, title, createdAt, updatedAt, systemInstruction, modelPath
      FROM \`_default\`.conversations
      WHERE __deleted IS MISSING
      ORDER BY updatedAt DESC
@@ -1076,4 +1124,587 @@ async function seedProductsIfEmpty(): Promise<void> {
   } catch (e) {
     dispatchDbProgress(`Product seed error: ${String(e)}`);
   }
+}
+
+// ── Disease Knowledge Base ───────────────────────────────────────────────────
+//
+// Reference documents only — seeded once from public/disease-profiles.ndjson
+// (generated by the plantkb/ pipeline, see plantkb/README.md) and never
+// written to from the UI. To pick up updated plantkb data, regenerate the
+// seed file (node scripts/copy-disease-profiles.mjs) and bump DB_SCHEMA_VERSION
+// so runMigrations() clears the collection and re-seeds — see resetProductCatalog
+// for the analogous product-catalog pattern.
+
+async function saveDiseaseKbDoc(id: string, body: Record<string, unknown>): Promise<void> {
+  if (!isTauri()) { webStore.set(COL_DISEASE_KB, id, body); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_DISEASE_KB, id, body);
+}
+
+function diseaseSearchText(doc: DiseaseKbDoc): string {
+  const parts: string[] = [doc.crop, doc.type === "disease_profile" ? doc.disease : "healthy"];
+  if (doc.type === "disease_profile") {
+    parts.push(doc.taxonomy.scientific_name.value, doc.taxonomy.pathogen_type.value);
+    parts.push(...doc.symptoms.map((s) => s.description));
+    parts.push(...doc.treatment.organic.map((t) => t.name));
+    parts.push(...doc.treatment.chemical.map((t) => t.name));
+    parts.push(...doc.treatment.cultural.map((t) => t.name));
+    parts.push(...doc.prevention.map((p) => p.description));
+  } else {
+    parts.push(...doc.visual_traits.map((v) => v.description));
+  }
+  return parts.filter(Boolean).join(" ");
+}
+
+async function seedDiseaseKbIfEmpty(): Promise<void> {
+  const existing = await listDiseaseProfiles();
+  if (existing.length > 0) {
+    dispatchDbProgress(`Disease knowledge base: ${existing.length} profiles`);
+    return;
+  }
+
+  dispatchDbProgress("Fetching disease knowledge base…");
+  try {
+    const res = await fetch("/disease-profiles.ndjson");
+    if (!res.ok) {
+      dispatchDbProgress(`Disease KB seed not found (HTTP ${res.status}) — skipping`);
+      return;
+    }
+    const text = await res.text();
+    const docs = text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as DiseaseKbDoc);
+
+    const BATCH = 10;
+    const total = docs.length;
+    let saved = 0;
+    let failed = 0;
+    for (let i = 0; i < total; i += BATCH) {
+      const results = await Promise.allSettled(
+        docs.slice(i, i + BATCH).map((doc) => {
+          const { id, ...body } = doc;
+          return saveDiseaseKbDoc(id, { ...body, searchText: diseaseSearchText(doc) });
+        }),
+      );
+      saved  += results.filter((r) => r.status === "fulfilled").length;
+      failed += results.filter((r) => r.status === "rejected").length;
+      dispatchDbProgress(`Seeding disease KB… ${Math.min(i + BATCH, total)}/${total}${failed > 0 ? ` (${failed} errors)` : ""}`);
+    }
+    dispatchDbProgress(`Disease KB ready — ${saved}/${total} saved${failed > 0 ? `, ${failed} failed` : ""}`);
+  } catch (e) {
+    dispatchDbProgress(`Disease KB seed error: ${String(e)}`);
+  }
+}
+
+export async function listDiseaseProfiles(): Promise<DiseaseKbDoc[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_DISEASE_KB) as unknown as DiseaseKbDoc[])
+      .filter((r) => !(r as unknown as Record<string, unknown>)["__deleted"]);
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, d.*
+     FROM \`_default\`.disease_kb AS d
+     WHERE __deleted IS MISSING
+     ORDER BY crop, disease
+     LIMIT 1000`,
+    {},
+  );
+  return rows as DiseaseKbDoc[];
+}
+
+/** Look up a single reference profile by its plantkb id, e.g. "tomato_late_blight". */
+export async function getDiseaseProfile(id: string): Promise<DiseaseKbDoc | null> {
+  if (!isTauri()) {
+    const doc = webStore.get(COL_DISEASE_KB, id);
+    return doc ? ({ id, ...doc } as DiseaseKbDoc) : null;
+  }
+  const { getDocument } = await import("tauri-plugin-cblite");
+  const doc = await getDocument(COL_DISEASE_KB, id).catch((e: unknown) => {
+    if (String(e).toLowerCase().includes("not found")) return null;
+    throw e;
+  });
+  return doc ? ({ id, ...(doc as Omit<DiseaseKbDoc, "id">) } as DiseaseKbDoc) : null;
+}
+
+export async function searchDiseaseProfiles(query: string): Promise<DiseaseKbDoc[]> {
+  if (!isTauri()) {
+    const q = query.toLowerCase();
+    return (webStore.list(COL_DISEASE_KB) as unknown as DiseaseKbDoc[])
+      .filter((r) => !(r as unknown as Record<string, unknown>)["__deleted"])
+      .filter((r) => (r as unknown as { searchText?: string }).searchText?.toLowerCase().includes(q));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, d.*
+     FROM \`_default\`.disease_kb AS d
+     WHERE MATCH(diseaseKbFts, $query) ORDER BY RANK(diseaseKbFts)`,
+    { query },
+  );
+  return rows as DiseaseKbDoc[];
+}
+
+// ── Inspections ────────────────────────────────────────────────────────────
+
+export async function listInspections(): Promise<InspectionRecord[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_INSPECTIONS) as unknown as InspectionRecord[])
+      .filter((r) => !(r as unknown as Record<string, unknown>)["__deleted"])
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, updatedAt, location, assetId, category, severity,
+            notes, photoRef, detections, aiReport, synced
+     FROM \`_default\`.inspections
+     WHERE __deleted IS MISSING
+     ORDER BY createdAt DESC
+     LIMIT 500`,
+    {},
+  );
+  return (rows as InspectionRecord[]).map((r) => ({ ...r, detections: r.detections ?? [] }));
+}
+
+export async function getInspection(id: string): Promise<InspectionRecord | null> {
+  if (!isTauri()) {
+    const doc = webStore.get(COL_INSPECTIONS, id);
+    return doc ? ({ id, ...doc } as InspectionRecord) : null;
+  }
+  const { getDocument } = await import("tauri-plugin-cblite");
+  const doc = await getDocument(COL_INSPECTIONS, id)
+    .catch((e: unknown) => {
+      if (String(e).toLowerCase().includes("not found")) return null;
+      throw e;
+    });
+  return doc ? { id, ...(doc as Omit<InspectionRecord, "id">) } : null;
+}
+
+export async function saveInspection(rec: InspectionRecord): Promise<void> {
+  const { id, ...body } = rec;
+  if (!isTauri()) { webStore.set(COL_INSPECTIONS, id, body as Record<string, unknown>); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_INSPECTIONS, id, body as Record<string, unknown>);
+}
+
+export async function deleteInspection(id: string): Promise<void> {
+  if (!isTauri()) { webStore.delete(COL_INSPECTIONS, id); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_INSPECTIONS, id, { __deleted: true });
+}
+
+export async function searchInspections(query: string): Promise<InspectionRecord[]> {
+  if (!isTauri()) {
+    const lower = query.toLowerCase();
+    return (webStore.list(COL_INSPECTIONS) as unknown as InspectionRecord[])
+      .filter((r) => {
+        const del = (r as unknown as Record<string, unknown>)["__deleted"];
+        return !del && (
+          r.notes.toLowerCase().includes(lower) ||
+          r.location.toLowerCase().includes(lower) ||
+          r.assetId.toLowerCase().includes(lower) ||
+          r.aiReport.toLowerCase().includes(lower)
+        );
+      })
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  try {
+    const rows = await executeQuery(
+      "N1QL",
+      `SELECT META().id AS id, createdAt, updatedAt, location, assetId, category, severity,
+              notes, photoRef, detections, aiReport, synced
+       FROM _default.inspections
+       WHERE MATCH(inspections.inspectionsFts, $query) AND __deleted IS MISSING
+       LIMIT 100`,
+      { query },
+    );
+    return rows as InspectionRecord[];
+  } catch {
+    return listInspections();
+  }
+}
+
+// ── Clinical Notes ─────────────────────────────────────────────────────────
+
+function hydrateClinicalNote(raw: Record<string, unknown>): ClinicalNote {
+  const note = raw as unknown as ClinicalNote;
+  if (typeof note.soapJson === "string" && note.soapJson) {
+    try { note.soap = JSON.parse(note.soapJson); } catch { note.soap = null; }
+  } else {
+    note.soap = null;
+  }
+  return note;
+}
+
+export async function listClinicalNotes(): Promise<ClinicalNote[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_CLINICAL) as unknown as Record<string, unknown>[])
+      .filter((r) => !r["__deleted"])
+      .map(hydrateClinicalNote)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, updatedAt, patientRef, encounter, noteType,
+            rawNotes, photoRef, soapJson, synced
+     FROM \`_default\`.clinical
+     WHERE __deleted IS MISSING
+     ORDER BY createdAt DESC
+     LIMIT 500`,
+    {},
+  );
+  return (rows as Record<string, unknown>[]).map(hydrateClinicalNote);
+}
+
+/** Load one note including its embedding vector. */
+export async function getClinicalNote(id: string): Promise<ClinicalNote | null> {
+  if (!isTauri()) {
+    const doc = webStore.get(COL_CLINICAL, id);
+    return doc ? hydrateClinicalNote({ id, ...doc }) : null;
+  }
+  const { getDocument } = await import("tauri-plugin-cblite");
+  const doc = await getDocument(COL_CLINICAL, id)
+    .catch((e: unknown) => {
+      if (String(e).toLowerCase().includes("not found")) return null;
+      throw e;
+    });
+  return doc ? hydrateClinicalNote({ id, ...(doc as Record<string, unknown>) }) : null;
+}
+
+/** Fields that contain PHI — marked as CBL Encryptable for FLE on Tauri/EE. */
+const CLINICAL_ENCRYPTED_FIELDS = ["rawNotes", "soapJson", "photoRef"];
+
+export async function saveClinicalNote(note: ClinicalNote): Promise<void> {
+  const { id, soap, ...rest } = note;
+  // Serialise the structured SOAP object to a string so it can be field-encrypted.
+  const body = { ...rest, soapJson: soap ? JSON.stringify(soap) : "" };
+  if (!isTauri()) { webStore.set(COL_CLINICAL, id, body as Record<string, unknown>); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_CLINICAL, id, body as Record<string, unknown>, CLINICAL_ENCRYPTED_FIELDS);
+}
+
+export async function deleteClinicalNote(id: string): Promise<void> {
+  if (!isTauri()) { webStore.delete(COL_CLINICAL, id); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_CLINICAL, id, { __deleted: true });
+}
+
+export async function searchClinicalNotes(query: string): Promise<ClinicalNote[]> {
+  if (!isTauri()) {
+    const lower = query.toLowerCase();
+    return (webStore.list(COL_CLINICAL) as unknown as Record<string, unknown>[])
+      .filter((r) => {
+        return !r["__deleted"] && (
+          String(r["rawNotes"] ?? "").toLowerCase().includes(lower) ||
+          String(r["patientRef"] ?? "").toLowerCase().includes(lower) ||
+          String(r["encounter"] ?? "").toLowerCase().includes(lower)
+        );
+      })
+      .map(hydrateClinicalNote)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  try {
+    const rows = await executeQuery(
+      "N1QL",
+      `SELECT META().id AS id, createdAt, updatedAt, patientRef, encounter, noteType,
+              rawNotes, photoRef, soapJson, synced
+       FROM _default.clinical
+       WHERE MATCH(clinical.clinicalFts, $query) AND __deleted IS MISSING
+       LIMIT 100`,
+      { query },
+    );
+    return (rows as Record<string, unknown>[]).map(hydrateClinicalNote);
+  } catch {
+    return listClinicalNotes();
+  }
+}
+
+/** Load all notes that have an embedding vector (for similarity search). */
+export async function listClinicalNotesWithEmbeddings(): Promise<ClinicalNote[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_CLINICAL) as unknown as Record<string, unknown>[])
+      .filter((r) => !r["__deleted"] && (r["embedding"] as number[] | undefined)?.length)
+      .map(hydrateClinicalNote);
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, patientRef, encounter, noteType, soapJson, embedding
+     FROM \`_default\`.clinical
+     WHERE __deleted IS MISSING AND embedding IS NOT MISSING
+     LIMIT 500`,
+    {},
+  );
+  return (rows as Record<string, unknown>[]).map(hydrateClinicalNote).filter((r) => r.embedding?.length);
+}
+
+// ── Photo Library ───────────────────────────────────────────────────────────
+
+export async function savePhoto(photo: PhotoDoc): Promise<void> {
+  const { id, ...rest } = photo;
+  if (!isTauri()) { webStore.set(COL_PHOTOS, id, rest as Record<string, unknown>); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_PHOTOS, id, rest as Record<string, unknown>);
+}
+
+export async function listPhotos(): Promise<PhotoDoc[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_PHOTOS) as unknown as PhotoDoc[])
+      .filter((p) => !(p as unknown as Record<string, unknown>)["__deleted"])
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, caption, labels, scores, photoRef, thumb, synced
+     FROM \`_default\`.photos
+     WHERE __deleted IS MISSING ORDER BY createdAt DESC`,
+    {},
+  );
+  return (rows as unknown as PhotoDoc[]).map((r) => ({ ...r, embedding: [] }));
+}
+
+export async function listPhotosWithEmbeddings(): Promise<PhotoDoc[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_PHOTOS) as unknown as PhotoDoc[])
+      .filter((p) => !(p as unknown as Record<string, unknown>)["__deleted"] && (p.embedding?.length ?? 0) > 0);
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, caption, labels, scores, embedding, photoRef, thumb, synced
+     FROM \`_default\`.photos
+     WHERE __deleted IS MISSING AND embedding IS NOT MISSING
+     LIMIT 500`,
+    {},
+  );
+  return (rows as unknown as PhotoDoc[]).filter((r) => r.embedding?.length);
+}
+
+export async function getPhoto(id: string): Promise<PhotoDoc | null> {
+  if (!isTauri()) {
+    const raw = webStore.get(COL_PHOTOS, id);
+    return raw ? ({ id, ...raw } as unknown as PhotoDoc) : null;
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, caption, labels, scores, embedding, faces, photoRef, thumb, synced
+     FROM \`_default\`.photos WHERE META().id = $id`,
+    { id },
+  );
+  return rows.length ? (rows[0] as unknown as PhotoDoc) : null;
+}
+
+export async function listPhotosWithFaces(): Promise<PhotoDoc[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_PHOTOS) as unknown as PhotoDoc[])
+      .filter((p) => !(p as unknown as Record<string, unknown>)["__deleted"])
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, caption, thumb, faces
+     FROM \`_default\`.photos
+     WHERE __deleted IS MISSING ORDER BY createdAt DESC`,
+    {},
+  );
+  return (rows as unknown as PhotoDoc[]).map((r) => ({ ...r, labels: [], scores: [], embedding: [], photoRef: "", synced: false }));
+}
+
+export async function deletePhoto(id: string): Promise<void> {
+  if (!isTauri()) { webStore.delete(COL_PHOTOS, id); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_PHOTOS, id, { __deleted: true });
+}
+
+// ── People (face identity records) ─────────────────────────────────────────
+
+export async function savePerson(person: PersonRecord): Promise<void> {
+  const { id, ...rest } = person;
+  if (!isTauri()) { webStore.set(COL_PEOPLE, id, rest as Record<string, unknown>); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_PEOPLE, id, rest as Record<string, unknown>);
+}
+
+export async function listPeople(): Promise<PersonRecord[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_PEOPLE) as unknown as PersonRecord[])
+      .filter((p) => !(p as unknown as Record<string, unknown>)["__deleted"])
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, name, faceThumb, createdAt
+     FROM \`_default\`.people WHERE __deleted IS MISSING ORDER BY name ASC`,
+    {},
+  );
+  return rows as unknown as PersonRecord[];
+}
+
+export async function deletePerson(id: string): Promise<void> {
+  if (!isTauri()) { webStore.delete(COL_PEOPLE, id); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_PEOPLE, id, { __deleted: true });
+}
+
+export async function searchPhotos(query: string): Promise<PhotoDoc[]> {
+  if (!isTauri()) {
+    const q = query.toLowerCase();
+    return (webStore.list(COL_PHOTOS) as unknown as PhotoDoc[])
+      .filter((p) => !(p as unknown as Record<string, unknown>)["__deleted"])
+      .filter((p) => p.caption.toLowerCase().includes(q) || p.labels.some((l) => l.toLowerCase().includes(q)));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, caption, labels, scores, photoRef, thumb, synced
+     FROM \`_default\`.photos
+     WHERE MATCH(photosFts, $query) ORDER BY RANK(photosFts)`,
+    { query },
+  );
+  return (rows as unknown as PhotoDoc[]).map((r) => ({ ...r, embedding: [] }));
+}
+
+// ── Dataset Annotations ────────────────────────────────────────────────────
+
+export async function saveAnnotation(rec: AnnotationRecord): Promise<void> {
+  const { id, ...rest } = rec;
+  if (!isTauri()) { webStore.set(COL_ANNOTATIONS, id, rest as Record<string, unknown>); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_ANNOTATIONS, id, rest as Record<string, unknown>);
+}
+
+export async function listAnnotations(status?: string): Promise<AnnotationRecord[]> {
+  if (!isTauri()) {
+    let all = (webStore.list(COL_ANNOTATIONS) as unknown as AnnotationRecord[])
+      .filter((r) => !(r as unknown as Record<string, unknown>)["__deleted"]);
+    if (status) all = all.filter((r) => r.status === status);
+    return all.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const where = status
+    ? "WHERE __deleted IS MISSING AND status = $status ORDER BY createdAt DESC"
+    : "WHERE __deleted IS MISSING ORDER BY createdAt DESC";
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, updatedAt, imageRef, thumb, labels, boxes, status, annotatorId, synced
+     FROM \`_default\`.annotations ${where}`,
+    status ? { status } : {},
+  );
+  return (rows as unknown as AnnotationRecord[]).map((r) => ({ ...r, embedding: [] }));
+}
+
+export async function listAnnotationsWithEmbeddings(): Promise<AnnotationRecord[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_ANNOTATIONS) as unknown as AnnotationRecord[])
+      .filter((r) => !(r as unknown as Record<string, unknown>)["__deleted"] && (r.embedding?.length ?? 0) > 0);
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, thumb, labels, status, embedding
+     FROM \`_default\`.annotations
+     WHERE __deleted IS MISSING AND embedding IS NOT MISSING LIMIT 500`,
+    {},
+  );
+  return rows as unknown as AnnotationRecord[];
+}
+
+export async function deleteAnnotation(id: string): Promise<void> {
+  if (!isTauri()) { webStore.delete(COL_ANNOTATIONS, id); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_ANNOTATIONS, id, { __deleted: true });
+}
+
+export async function searchAnnotations(query: string): Promise<AnnotationRecord[]> {
+  if (!isTauri()) {
+    const q = query.toLowerCase();
+    return (webStore.list(COL_ANNOTATIONS) as unknown as AnnotationRecord[])
+      .filter((r) => !(r as unknown as Record<string, unknown>)["__deleted"])
+      .filter((r) => r.labels?.some((l) => l.toLowerCase().includes(q)));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, updatedAt, imageRef, thumb, labels, boxes, status, annotatorId, synced
+     FROM \`_default\`.annotations
+     WHERE MATCH(annotationsFts, $query) ORDER BY RANK(annotationsFts)`,
+    { query },
+  );
+  return (rows as unknown as AnnotationRecord[]).map((r) => ({ ...r, embedding: [] }));
+}
+
+// ── Crop Disease ──────────────────────────────────────────────────────────────
+
+export async function listCropDiseases(): Promise<CropDiseaseRecord[]> {
+  if (!isTauri()) {
+    return (webStore.list(COL_CROP_DISEASE) as unknown as CropDiseaseRecord[])
+      .filter((r) => !(r as unknown as Record<string, unknown>)["__deleted"])
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, updatedAt, photoRef, cropType, location, notes, leaves, synced
+     FROM \`_default\`.crop_disease
+     WHERE __deleted IS MISSING
+     ORDER BY createdAt DESC
+     LIMIT 500`,
+    {},
+  );
+  return rows as CropDiseaseRecord[];
+}
+
+export async function getCropDisease(id: string): Promise<CropDiseaseRecord | null> {
+  if (!isTauri()) {
+    const doc = webStore.get(COL_CROP_DISEASE, id);
+    return doc ? ({ id, ...doc } as CropDiseaseRecord) : null;
+  }
+  const { getDocument } = await import("tauri-plugin-cblite");
+  const doc = await getDocument(COL_CROP_DISEASE, id).catch((e: unknown) => {
+    if (String(e).toLowerCase().includes("not found")) return null;
+    throw e;
+  });
+  return doc ? { id, ...(doc as Omit<CropDiseaseRecord, "id">) } : null;
+}
+
+export async function saveCropDisease(rec: CropDiseaseRecord): Promise<void> {
+  const { id, ...body } = rec;
+  if (!isTauri()) { webStore.set(COL_CROP_DISEASE, id, body as Record<string, unknown>); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_CROP_DISEASE, id, body as Record<string, unknown>);
+}
+
+export async function deleteCropDisease(id: string): Promise<void> {
+  if (!isTauri()) { webStore.delete(COL_CROP_DISEASE, id); return; }
+  const { saveDocument } = await import("tauri-plugin-cblite");
+  await saveDocument(COL_CROP_DISEASE, id, { __deleted: true });
+}
+
+export async function searchCropDiseases(query: string): Promise<CropDiseaseRecord[]> {
+  if (!isTauri()) {
+    const q = query.toLowerCase();
+    return (webStore.list(COL_CROP_DISEASE) as unknown as CropDiseaseRecord[])
+      .filter((r) => !(r as unknown as Record<string, unknown>)["__deleted"])
+      .filter((r) => r.notes?.toLowerCase().includes(q) || r.location?.toLowerCase().includes(q) || r.cropType?.toLowerCase().includes(q));
+  }
+  const { executeQuery } = await import("tauri-plugin-cblite");
+  const rows = await executeQuery(
+    "N1QL",
+    `SELECT META().id AS id, createdAt, updatedAt, photoRef, cropType, location, notes, leaves, synced
+     FROM \`_default\`.crop_disease
+     WHERE MATCH(cropDiseaseFts, $query) ORDER BY RANK(cropDiseaseFts)`,
+    { query },
+  );
+  return rows as CropDiseaseRecord[];
 }
