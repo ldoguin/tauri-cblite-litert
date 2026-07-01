@@ -1,0 +1,10 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "types": ["mocha", "node"],
+    "noEmit": true
+  },
+  "include": ["tests/e2e/**/*.ts"]
+}

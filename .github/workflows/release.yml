@@ -1,0 +1,397 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: 'Rust build profile'
+        required: false
+        default: 'release'
+        type: choice
+        options: [release, dist]
+
+env:
+  CARGO_TERM_COLOR: always
+  BUILD_PROFILE: ${{ inputs.profile || 'release' }}
+
+jobs:
+  # ── Linux x86_64 ─────────────────────────────────────────────────────────────
+  build-linux-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      # Check out this repo + sibling plugin repos at the same relative paths
+      # as they have on dev machines (Cargo.toml: path = "../../tauri-plugin-*")
+      - uses: actions/checkout@v4
+        with:
+          path: tauri-cblite-litert
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ldoguin/tauri-plugin-cblite
+          path: tauri-plugin-cblite
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ldoguin/tauri-plugin-litert
+          path: tauri-plugin-litert
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libpango1.0-dev \
+            libglib2.0-dev \
+            libsoup-3.0-dev \
+            libjavascriptcoregtk-4.1-dev \
+            libspeechd-dev \
+            patchelf
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: tauri-cblite-litert/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: linux-x86_64-cargo-${{ hashFiles('tauri-cblite-litert/src-tauri/Cargo.lock') }}
+          restore-keys: linux-x86_64-cargo-
+
+      - uses: actions/cache@v4
+        with:
+          path: tauri-cblite-litert/src-tauri/target
+          key: linux-x86_64-build-${{ hashFiles('tauri-cblite-litert/src-tauri/Cargo.lock') }}
+          restore-keys: linux-x86_64-build-
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/litert-sys
+            ~/.cache/litert-lm-sys
+            ~/.cache/litert-lm-sys-webgpu
+          key: linux-x86_64-litert-${{ hashFiles('tauri-cblite-litert/src-tauri/build.rs') }}
+
+      - name: Install JS dependencies
+        working-directory: tauri-cblite-litert
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        working-directory: tauri-cblite-litert
+        run: |
+          if [[ "$BUILD_PROFILE" == "dist" ]]; then
+            pnpm tauri build -- --profile dist
+          else
+            pnpm tauri:build
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-deb
+          path: tauri-cblite-litert/src-tauri/target/release/bundle/deb/*.deb
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x86_64-appimage
+          path: tauri-cblite-litert/src-tauri/target/release/bundle/appimage/*.AppImage
+
+  # ── Linux aarch64 (Pi 5 / ARM64 servers) ─────────────────────────────────────
+  build-linux-aarch64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tauri-cblite-litert
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ldoguin/tauri-plugin-cblite
+          path: tauri-plugin-cblite
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ldoguin/tauri-plugin-litert
+          path: tauri-plugin-litert
+
+      # GitHub Actions ubuntu-24.04 uses deb822 sources without arch constraints.
+      # Rewrite to per-arch mirror entries so arm64 packages come from ports.ubuntu.com.
+      - name: Set up multi-arch apt sources
+        run: |
+          sudo rm -f /etc/apt/sources.list.d/*.sources /etc/apt/sources.list
+          sudo dpkg --add-architecture arm64
+          printf '%s\n' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble main restricted universe multiverse' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse' \
+            'deb [arch=amd64] http://archive.ubuntu.com/ubuntu noble-security main restricted universe multiverse' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse' \
+            'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse' \
+            | sudo tee /etc/apt/sources.list
+
+      - name: Install cross-compile toolchain + ARM64 sysroot
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            build-essential pkg-config libclang-dev clang patchelf curl \
+            libwebkit2gtk-4.1-dev:arm64 libgtk-3-dev:arm64 librsvg2-dev:arm64 \
+            libssl-dev:arm64 libpango1.0-dev:arm64 libglib2.0-dev:arm64 \
+            libsoup-3.0-dev:arm64 libjavascriptcoregtk-4.1-dev:arm64 \
+            libspeechd-dev:arm64
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: tauri-cblite-litert/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-gnu
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: linux-aarch64-cargo-${{ hashFiles('tauri-cblite-litert/src-tauri/Cargo.lock') }}
+          restore-keys: linux-aarch64-cargo-
+
+      - uses: actions/cache@v4
+        with:
+          path: tauri-cblite-litert/src-tauri/target
+          key: linux-aarch64-build-${{ hashFiles('tauri-cblite-litert/src-tauri/Cargo.lock') }}
+          restore-keys: linux-aarch64-build-
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/litert-sys
+            ~/.cache/litert-lm-sys
+            ~/.cache/litert-lm-sys-webgpu
+          key: linux-aarch64-litert-${{ hashFiles('tauri-cblite-litert/src-tauri/build.rs') }}
+
+      - name: Install JS dependencies
+        working-directory: tauri-cblite-litert
+        run: pnpm install --frozen-lockfile
+
+      - name: Build frontend
+        working-directory: tauri-cblite-litert
+        run: pnpm build
+
+      - name: Build libspeechd stub (aarch64)
+        working-directory: tauri-cblite-litert/src-tauri
+        run: |
+          aarch64-linux-gnu-gcc -shared -fPIC \
+            -Wl,-soname,libspeechd.so.2 \
+            libspeechd-stub.c \
+            -o libspeechd-stub.so
+
+      - name: Phase 1 — Rust build (downloads + prepares native libs)
+        working-directory: tauri-cblite-litert/src-tauri
+        env:
+          PKG_CONFIG_ALLOW_CROSS: '1'
+          PKG_CONFIG_SYSROOT_DIR: /usr/aarch64-linux-gnu
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: cargo build --release --target aarch64-unknown-linux-gnu --manifest-path Cargo.toml
+
+      - name: Fetch libcblite arm64 (if missing from Cargo git checkout)
+        run: |
+          CBL_ARM64=$(find ~/.cargo/git/checkouts -type d \
+            -path '*/couchbase-lite-rust-*/*/libcblite_community/lib/aarch64-unknown-linux-gnu' \
+            2>/dev/null | head -1)
+          if [[ -n "$CBL_ARM64" && ! -f "$CBL_ARM64/libcblite.so.4" ]]; then
+            TMPDIR_CBL=$(mktemp -d)
+            curl -fL 'https://packages.couchbase.com/releases/couchbase-lite-c/4.0.3/couchbase-lite-c-community-4.0.3-linux-arm64.tar.gz' \
+              | tar -xz -C "$TMPDIR_CBL"
+            find "$TMPDIR_CBL" -name 'libcblite.so.4' -exec cp {} "$CBL_ARM64/" \;
+            rm -rf "$TMPDIR_CBL"
+            echo "Installed libcblite.so.4 → $CBL_ARM64"
+          fi
+
+      - name: Collect native libs into bundle-libs/
+        working-directory: tauri-cblite-litert/src-tauri
+        run: |
+          mkdir -p bundle-libs
+          LITERT_OUT=$(find target/aarch64-unknown-linux-gnu/release/build/tauri-cblite-litert-*/out \
+            -maxdepth 0 -type d 2>/dev/null | head -1)
+          [[ -n "$LITERT_OUT" ]] && cp "$LITERT_OUT"/lib*.so bundle-libs/ 2>/dev/null || true
+          CBL_LIB=$(find ~/.cargo/git/checkouts \
+            -path '*/couchbase-lite-rust-*/*/libcblite_community/lib/aarch64-unknown-linux-gnu/libcblite.so.4' \
+            2>/dev/null | head -1)
+          [[ -n "$CBL_LIB" ]] && cp "$CBL_LIB" bundle-libs/
+          echo "bundle-libs contents:"; ls bundle-libs/
+
+      - name: Phase 2 — Bundle .deb
+        working-directory: tauri-cblite-litert
+        env:
+          PKG_CONFIG_ALLOW_CROSS: '1'
+          PKG_CONFIG_SYSROOT_DIR: /usr/aarch64-linux-gnu
+          PKG_CONFIG_PATH: /usr/lib/aarch64-linux-gnu/pkgconfig
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
+          CXX_aarch64_unknown_linux_gnu: aarch64-linux-gnu-g++
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+        run: |
+          EXTRA_ARGS=""
+          [[ "$BUILD_PROFILE" == "dist" ]] && EXTRA_ARGS="-- --profile dist"
+          cargo tauri build --target aarch64-unknown-linux-gnu --bundles deb $EXTRA_ARGS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-aarch64-deb
+          path: tauri-cblite-litert/src-tauri/target/aarch64-unknown-linux-gnu/release/bundle/deb/*.deb
+
+  # ── Android (APK + AAB) ───────────────────────────────────────────────────────
+  # Requires: tauri-plugin-cblite with Android arm64 libcblite.so, and
+  # tauri-plugin-litert with Android LiteRT prebuilt libs.
+  # Check those plugins' build.rs / Cargo features for Android support.
+  build-android:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: tauri-cblite-litert
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ldoguin/tauri-plugin-cblite
+          path: tauri-plugin-cblite
+
+      - uses: actions/checkout@v4
+        with:
+          repository: ldoguin/tauri-plugin-litert
+          path: tauri-plugin-litert
+
+      - uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install NDK r27
+        run: |
+          sdkmanager "ndk;27.0.12077973"
+          echo "NDK_HOME=$ANDROID_SDK_ROOT/ndk/27.0.12077973" >> "$GITHUB_ENV"
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+          cache-dependency-path: tauri-cblite-litert/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: android-cargo-${{ hashFiles('tauri-cblite-litert/src-tauri/Cargo.lock') }}
+          restore-keys: android-cargo-
+
+      - uses: actions/cache@v4
+        with:
+          path: tauri-cblite-litert/src-tauri/target
+          key: android-build-${{ hashFiles('tauri-cblite-litert/src-tauri/Cargo.lock') }}
+          restore-keys: android-build-
+
+      - name: Install JS dependencies
+        working-directory: tauri-cblite-litert
+        run: pnpm install --frozen-lockfile
+
+      - name: Initialize Android project
+        working-directory: tauri-cblite-litert
+        run: pnpm tauri android init
+
+      - name: Build Android APK
+        working-directory: tauri-cblite-litert
+        env:
+          NDK_HOME: ${{ env.NDK_HOME }}
+        run: pnpm tauri:android:build -- --apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-apk
+          path: tauri-cblite-litert/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+
+  # ── Web (Vite standalone, no Tauri runtime) ───────────────────────────────────
+  # Produces a static site with browser-native ML (mediapipe/transformers.js).
+  # Tauri plugin calls (cblite, litert, tts) will fail at runtime unless
+  # src/lib/{db,llm,tools}.ts add VITE_WEB_MODE branches with browser fallbacks.
+  build-web:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+        env:
+          VITE_WEB_MODE: 'true'
+          # Override Tauri-specific build targets — web uses latest browsers
+          TAURI_ENV_PLATFORM: ''
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: dist/
+
+  # ── GitHub Release (tags only) ────────────────────────────────────────────────
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [build-linux-x86_64, build-linux-aarch64, build-android, build-web]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: List artifacts
+        run: find artifacts/ -type f | sort
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/linux-x86_64-deb/*.deb
+            artifacts/linux-x86_64-appimage/*.AppImage
+            artifacts/linux-aarch64-deb/*.deb
+            artifacts/android-apk/**/*.apk

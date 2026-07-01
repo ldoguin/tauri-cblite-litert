@@ -1,0 +1,170 @@
+name: E2E Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  e2e:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      # ── Source ──────────────────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+
+      # ── System runtime deps ──────────────────────────────────────────────────
+      # webkit2gtk-driver  → WebKitWebDriver binary (used instead of tauri-driver)
+      # xvfb               → virtual framebuffer for headless GTK/WebKit
+      # mesa-vulkan-drivers → software Vulkan (llvmpipe) so LiteRT doesn't abort
+      # patchelf           → fixes RPATH of the bundled binary
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            webkit2gtk-driver \
+            libwebkit2gtk-4.1-0 \
+            libgtk-3-0 \
+            libsoup-3.0-0 \
+            libjavascriptcoregtk-4.1-0 \
+            libglib2.0-0 \
+            libcairo2 \
+            libgdk-pixbuf-2.0-0 \
+            libpango-1.0-0 \
+            libepoxy0 \
+            libdbus-1-3 \
+            xvfb \
+            libvulkan1 \
+            mesa-vulkan-drivers \
+            patchelf
+
+      # ── Toolchains ──────────────────────────────────────────────────────────
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      # ── Cargo cache ─────────────────────────────────────────────────────────
+      # Separate registry/git (shared across lock-file changes) from build
+      # artifacts (keyed to Cargo.lock for exact cache hit on repeated runs).
+      - name: Cache Cargo registry + git
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-reg-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-reg-
+
+      - name: Cache Cargo build artifacts
+        uses: actions/cache@v4
+        with:
+          path: src-tauri/target
+          key: ${{ runner.os }}-cargo-build-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-build-
+
+      # ── LiteRT + CBL native library cache ───────────────────────────────────
+      # build.rs downloads these at build time; cache them to skip re-downloads.
+      # Key on build.rs since that's where the version constants live.
+      - name: Cache LiteRT + CBL native libraries
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/litert-sys
+            ~/.cache/litert-lm-sys
+            ~/.cache/litert-lm-sys-webgpu
+          key: ${{ runner.os }}-litert-${{ hashFiles('src-tauri/build.rs') }}
+
+      # ── JS deps ─────────────────────────────────────────────────────────────
+      - name: Install pnpm dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── Start CBS + Sync Gateway (in background while the app builds) ────────
+      # docker compose handles the CBS→cbs-init→SG dependency chain.
+      # Skip if SG is already reachable (e.g. act local run with existing containers).
+      - name: Start Couchbase Server + Sync Gateway
+        run: |
+          if curl -sf http://localhost:4984/ >/dev/null 2>&1; then
+            echo "Sync Gateway already reachable — skipping docker compose up"
+          else
+            docker compose -f docker/compose.yml up -d
+          fi
+
+      # ── Build the Tauri app ──────────────────────────────────────────────────
+      # build.rs also downloads and bundles the LiteRT/CBL .so files.
+      # Skip if a release binary already exists (fast-path for local act runs
+      # where the workspace is bind-mounted with a pre-built target/).
+      - name: Build Tauri app
+        run: |
+          if [[ -f src-tauri/target/release/tauri-cblite-litert ]]; then
+            echo "Release binary already present — skipping rebuild"
+          else
+            pnpm tauri:build
+          fi
+
+      # ── Stage libcblite.so.4 inside the workspace ────────────────────────────
+      # The bundle script needs the host-arch libcblite.so.4 in a workspace-
+      # relative path so it is accessible from inside the act container
+      # (--bind only mounts the project dir, not ~/.cargo).
+      # In real CI the build step populates the cargo git checkout; in local act
+      # runs scripts/stage-libcblite.sh must be run once beforehand.
+      - name: Stage libcblite.so.4
+        run: bash scripts/stage-libcblite.sh
+
+      # ── Bundle: collect binary + custom .so files, patch RPATH ──────────────
+      - name: Bundle e2e binary
+        run: bash scripts/bundle-e2e.sh
+
+      # ── Wait for SG (CBS + init + SG together can take ~2 min cold) ─────────
+      - name: Wait for Sync Gateway
+        run: |
+          echo "Waiting for Sync Gateway on :4984 (up to 120 s)..."
+          timeout 120 bash -c 'until curl -sf http://localhost:4984/ >/dev/null; do sleep 3; done'
+          echo "Sync Gateway is ready."
+
+      # ── Disable native TTS in CI ─────────────────────────────────────────────
+      # lib.rs checks if /usr/lib/tauri-cblite-litert/libspeechd.so.2 is a
+      # symlink to detect the "stub" case and skip TTS init.  The .deb
+      # postinstall creates this symlink, but CI has no .deb.  Create it
+      # manually so the app falls back to Xenova TTS instead of panicking.
+      - name: Disable native TTS (stub marker)
+        run: |
+          mkdir -p /usr/lib/tauri-cblite-litert
+          ln -sf /dev/null /usr/lib/tauri-cblite-litert/libspeechd.so.2
+
+      # ── Run e2e tests under Xvfb ────────────────────────────────────────────
+      # xvfb-run -a picks a free display number automatically.
+      # The spec's before() hook opens a fresh CBL database so there is
+      # no stale-revID state from previous CI runs.
+      - name: Run e2e tests
+        env:
+          TAURI_BINARY: dist/e2e-bundle/tauri-cblite-litert
+        run: |
+          xvfb-run -a --server-args="-screen 0 1280x1024x24" pnpm test:e2e
+
+      # ── Artefacts ───────────────────────────────────────────────────────────
+      - name: Upload WebdriverIO logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wdio-logs
+          path: |
+            wdio-*.log
+            logs/
+          if-no-files-found: ignore
+
+      # ── Teardown ────────────────────────────────────────────────────────────
+      - name: Stop containers
+        if: always()
+        run: docker compose -f docker/compose.yml down -v

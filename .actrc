@@ -1,0 +1,4 @@
+-P ubuntu-24.04=catthehacker/ubuntu:act-24.04
+--container-daemon-socket unix:///run/user/1000/podman/podman.sock
+--network host
+--bind
