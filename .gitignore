@@ -31,6 +31,9 @@ pnpm-debug.log*
 *.litertlm
 *.onnx
 models/
+# Zero-byte placeholder keeps Tauri's bundle.resources glob non-empty when no
+# manually-sourced bundled models are present yet — see resources/bundled-models/README.md
+!src-tauri/resources/bundled-models/.placeholder.tflite
 
 # Porcupine wake word model (run: curl -L https://raw.githubusercontent.com/Picovoice/porcupine/master/lib/common/porcupine_params.pv -o public/porcupine_params.pv)
 public/porcupine_params.pv
@@ -45,11 +48,21 @@ packages/tauri-plugin-litert-api/dist/
 
 # Vendored deps and large datasets (managed/downloaded separately)
 vendor/
-data/
+/data/
 
 # Generated seed assets (regenerate via scripts/import-fashion.mjs)
 public/products-seed.json
 public/embeddings.json
+
+# Generated seed asset (regenerate via scripts/copy-disease-profiles.mjs)
+public/disease-profiles.ndjson
+
+# plantkb (Python pipeline) — venv, caches, and reproducible build output
+plantkb/.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+plantkb/build/
 
 # Local cargo config (machine-specific Android NDK paths)
 .cargo/config.toml
@@ -60,4 +73,8 @@ public/embeddings.json
 screen.jpg
 plants.csv
 com/
-.claude/settings.local.json
+.claude/
+.pnpm-store/
+leafdieseasesplan.md
+bin/
+models

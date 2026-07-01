@@ -64,8 +64,8 @@ pnpm install
 
 ```bash
 # Example: Gemma 3 1B (requires ~1 GB disk)
-huggingface-cli download litert-community/Gemma3-1B-IT-int4 \
-  --include "*.litertlm" --local-dir models/
+huggingface-cli download litert-community/Gemma3-1B-IT \
+  --include "gemma3-1b-it-int4.litertlm" --local-dir models/
 ```
 
 **Embedding model** — MediaPipe BERT embedder (int32 input tensors, works in browser and on-device):
