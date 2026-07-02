@@ -5,12 +5,16 @@ services:
       - "8091-8096:8091-8096"
       - "11210:11210"
     mem_limit: "4g"
+    ulimits:
+      nofile:
+        soft: 200000
+        hard: 200000
     environment:
       - CLUSTER_NAME=sync-test-cluster
     volumes:
       - cbs_data:/opt/couchbase/var
     healthcheck:
-      test: ["CMD", "sh", "-c", "code=$(curl -so /dev/null -m 5 -w '%{http_code}' http://localhost:8091/pools); [ \"$code\" -eq 200 ] || [ \"$code\" -eq 401 ]"]
+      test: ["CMD", "sh", "-c", "code=$(curl -so /dev/null -m 5 -w '%{http_code}' http://localhost:8091/pools); [ \"$$code\" -eq 200 ] || [ \"$$code\" -eq 401 ]"]
       interval: 5s
       retries: 30
       start_period: 60s
