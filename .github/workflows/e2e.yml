@@ -18,11 +18,10 @@ jobs:
       - uses: actions/checkout@v4
 
       # tauri-plugin-cblite is a path dependency (../../tauri-plugin-cblite).
-      # Check it out as a sibling so Cargo can resolve it in CI.
-      - uses: actions/checkout@v4
-        with:
-          repository: ldoguin/tauri-plugin-cblite
-          path: ../tauri-plugin-cblite
+      # actions/checkout refuses paths outside GITHUB_WORKSPACE, so use
+      # a plain git clone into the sibling directory Cargo expects.
+      - name: Checkout tauri-plugin-cblite sibling
+        run: git clone https://github.com/ldoguin/tauri-plugin-cblite ../tauri-plugin-cblite
 
       # ── System runtime deps ──────────────────────────────────────────────────
       # webkit2gtk-driver  → WebKitWebDriver binary (used instead of tauri-driver)
