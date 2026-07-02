@@ -17,6 +17,13 @@ jobs:
       # ── Source ──────────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
+      # tauri-plugin-cblite is a path dependency (../../tauri-plugin-cblite).
+      # Check it out as a sibling so Cargo can resolve it in CI.
+      - uses: actions/checkout@v4
+        with:
+          repository: ldoguin/tauri-plugin-cblite
+          path: ../tauri-plugin-cblite
+
       # ── System runtime deps ──────────────────────────────────────────────────
       # webkit2gtk-driver  → WebKitWebDriver binary (used instead of tauri-driver)
       # xvfb               → virtual framebuffer for headless GTK/WebKit
