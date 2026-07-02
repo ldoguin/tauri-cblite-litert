@@ -101,6 +101,11 @@ jobs:
             docker compose -f docker/compose.yml up -d
           fi
 
+      # ── Dump CBS logs if compose up failed ──────────────────────────────────
+      - name: Dump Couchbase logs on failure
+        if: failure()
+        run: docker compose -f docker/compose.yml logs couchbase
+
       # ── Build the Tauri app ──────────────────────────────────────────────────
       # build.rs also downloads and bundles the LiteRT/CBL .so files.
       # Skip if a release binary already exists (fast-path for local act runs
