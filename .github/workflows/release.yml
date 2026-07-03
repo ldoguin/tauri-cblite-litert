@@ -312,45 +312,48 @@ jobs:
           EOF
 
       # Kotlin 2.3.0 removed the kotlinOptions.jvmTarget String setter.
-      # tauri android init generates the old DSL; migrate to compilerOptions.
-      - name: Patch app/build.gradle.kts — migrate kotlinOptions to compilerOptions
+      # Patch ALL Android modules: our app, tauri-android, and every plugin
+      # subproject listed in tauri.settings.gradle (including cargo-registry paths).
+      - name: Patch all Android modules — migrate kotlinOptions to compilerOptions
         run: |
           python3 - <<'EOF'
-          import pathlib, re
+          import pathlib, re, subprocess
 
-          f = pathlib.Path("src-tauri/gen/android/app/build.gradle.kts")
-          t = f.read_text()
-
-          # Only patch if the old API is still present
-          if 'kotlinOptions' in t:
-              # Extract jvmTarget value (e.g. "1.8")
+          def patch_kotlin_options(f):
+              subprocess.run(["chmod", "+w", str(f)], capture_output=True)
+              t = f.read_text()
+              if 'kotlinOptions' not in t:
+                  return False
               m = re.search(r'kotlinOptions\s*\{[^}]*jvmTarget\s*=\s*"([^"]+)"', t, re.DOTALL)
               jvm_ver = m.group(1).replace('.', '_') if m else '1_8'
-
-              # Remove the kotlinOptions block (wherever it sits — inside or outside android {})
               t = re.sub(r'\n?\s*kotlinOptions\s*\{[^}]*\}', '', t, flags=re.DOTALL)
-
-              # Add JvmTarget import if missing
               if 'JvmTarget' not in t:
-                  t = re.sub(
-                      r'(import java\.util\.Properties)',
-                      r'\1\nimport org.jetbrains.kotlin.gradle.dsl.JvmTarget',
-                      t, count=1
-                  )
-                  if 'JvmTarget' not in t:
+                  if 'import java.util.Properties' in t:
+                      t = t.replace(
+                          'import java.util.Properties',
+                          'import java.util.Properties\nimport org.jetbrains.kotlin.gradle.dsl.JvmTarget'
+                      )
+                  else:
                       t = 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' + t
-
-              # Append top-level compilerOptions block if not already present
               if 'compilerOptions' not in t:
                   t += f'\nkotlin {{\n    compilerOptions {{\n        jvmTarget.set(JvmTarget.JVM_{jvm_ver})\n    }}\n}}\n'
-
               f.write_text(t)
-              print(f"Patched kotlinOptions → compilerOptions (JVM_{jvm_ver})")
-          else:
-              print("kotlinOptions not found — skipping (already uses compilerOptions DSL)")
+              return True
 
-          print("\n=== app/build.gradle.kts after patch ===")
-          print(f.read_text())
+          # Collect all Android module directories: generated project + all subprojects
+          dirs = [pathlib.Path("src-tauri/gen/android")]
+          settings = pathlib.Path("src-tauri/gen/android/tauri.settings.gradle")
+          if settings.exists():
+              for m in re.finditer(r"projectDir\s*=\s*new File\(['\"]([^'\"]+)['\"]", settings.read_text()):
+                  d = pathlib.Path(m.group(1))
+                  if d.exists():
+                      dirs.append(d)
+                      print(f"Found subproject: {d}")
+
+          for d in dirs:
+              for f in d.rglob("*.gradle.kts"):
+                  if patch_kotlin_options(f):
+                      print(f"Patched: {f}")
           EOF
 
       # litert and litertlm-android AARs both ship libLiteRt.so; Gradle refuses
