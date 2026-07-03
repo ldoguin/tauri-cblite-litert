@@ -17,17 +17,7 @@ jobs:
       # ── Source ──────────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # Several path dependencies live in sibling repos outside GITHUB_WORKSPACE:
-      #   ../../tauri-plugin-cblite
-      #   ../../tauri-plugin-litert  (also provides vendor/litert + vendor/litertlm)
-      # actions/checkout refuses paths outside GITHUB_WORKSPACE, so use plain
-      # git clones — they resolve relative to the current working directory.
-      - name: Checkout sibling plugin repos
-        run: |
-          git clone https://github.com/ldoguin/tauri-plugin-cblite ../tauri-plugin-cblite
-          git clone https://github.com/ldoguin/tauri-plugin-litert ../tauri-plugin-litert
-
-      # ── System runtime deps ──────────────────────────────────────────────────
+# ── System runtime deps ──────────────────────────────────────────────────
       # webkit2gtk-driver  → WebKitWebDriver binary (used instead of tauri-driver)
       # xvfb               → virtual framebuffer for headless GTK/WebKit
       # mesa-vulkan-drivers → software Vulkan (llvmpipe) so LiteRT doesn't abort

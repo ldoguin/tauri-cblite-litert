@@ -2061,6 +2061,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 [[package]]
 name = "litert"
 version = "0.2.1"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88#fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88"
 dependencies = [
  "libloading 0.8.9",
  "litert-sys",
@@ -2070,6 +2071,7 @@ dependencies = [
 [[package]]
 name = "litert-lm-sys"
 version = "0.2.1"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88#fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88"
 dependencies = [
  "dirs 5.0.1",
  "flate2",
@@ -2084,6 +2086,7 @@ dependencies = [
 [[package]]
 name = "litert-sys"
 version = "0.2.1"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88#fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -2096,6 +2099,7 @@ dependencies = [
 [[package]]
 name = "litertlm"
 version = "0.2.1"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88#fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88"
 dependencies = [
  "litert-lm-sys",
  "litert-sys",
@@ -3970,6 +3974,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-cblite"
 version = "0.1.0"
+source = "git+https://github.com/ldoguin/tauri-plugin-cblite?rev=1b6b9b6acd42ffa24dc32089d6b3b03b0db02f7c#1b6b9b6acd42ffa24dc32089d6b3b03b0db02f7c"
 dependencies = [
  "base64 0.22.1",
  "couchbase_lite",
@@ -3983,6 +3988,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-litert"
 version = "0.1.0"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88#fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88"
 dependencies = [
  "litert",
  "litertlm",

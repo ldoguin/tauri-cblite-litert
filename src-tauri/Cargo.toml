@@ -23,10 +23,8 @@ hex = "0.4"
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
-#tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "1b6b9b6acd42ffa24dc32089d6b3b03b0db02f7c",  features = ["native-cbl"] }
-#tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "16a77423b79536f59f3d79b9755ad5c4bfc45b5e"}
-tauri-plugin-cblite = { path = "../../tauri-plugin-cblite", features = ["native-cbl"] }
-tauri-plugin-litert = { path = "../../tauri-plugin-litert"}
+tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "1b6b9b6acd42ffa24dc32089d6b3b03b0db02f7c", features = ["native-cbl"] }
+tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88" }
 tauri-plugin-tts = "0.1.11"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -37,8 +35,8 @@ base64 = "0.22"
 
 [dev-dependencies]
 # Direct access to the LiteRT backends for integration tests in tests/
-litert   = { path = "../../tauri-plugin-litert/vendor/litert" }
-litertlm = { path = "../../tauri-plugin-litert/vendor/litertlm" }
+litert   = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88" }
+litertlm = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88" }
 
 
 [profile.release]
