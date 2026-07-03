@@ -38,6 +38,7 @@ jobs:
             libdbus-1-dev \
             libssl-dev \
             librsvg2-dev \
+            libspeechd-dev \
             webkit2gtk-driver \
             xvfb \
             libvulkan1 \
