@@ -308,7 +308,7 @@ jobs:
         working-directory: tauri-cblite-litert
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
-        run: pnpm tauri:android:build -- --target aarch64 --target x86_64
+        run: pnpm tauri:android:build -- --target aarch64-linux-android --target x86_64-linux-android
 
       - uses: actions/upload-artifact@v4
         with:
