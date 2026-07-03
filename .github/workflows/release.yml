@@ -21,21 +21,9 @@ jobs:
   build-linux-x86_64:
     runs-on: ubuntu-24.04
     steps:
-      # Check out this repo + sibling plugin repos at the same relative paths
-      # as they have on dev machines (Cargo.toml: path = "../../tauri-plugin-*")
       - uses: actions/checkout@v4
         with:
           path: tauri-cblite-litert
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ldoguin/tauri-plugin-cblite
-          path: tauri-plugin-cblite
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ldoguin/tauri-plugin-litert
-          path: tauri-plugin-litert
 
       - name: Install system dependencies
         run: |
@@ -115,16 +103,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: tauri-cblite-litert
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ldoguin/tauri-plugin-cblite
-          path: tauri-plugin-cblite
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ldoguin/tauri-plugin-litert
-          path: tauri-plugin-litert
 
       # GitHub Actions ubuntu-24.04 uses deb822 sources without arch constraints.
       # Rewrite to per-arch mirror entries so arm64 packages come from ports.ubuntu.com.
@@ -271,16 +249,6 @@ jobs:
         with:
           path: tauri-cblite-litert
 
-      - uses: actions/checkout@v4
-        with:
-          repository: ldoguin/tauri-plugin-cblite
-          path: tauri-plugin-cblite
-
-      - uses: actions/checkout@v4
-        with:
-          repository: ldoguin/tauri-plugin-litert
-          path: tauri-plugin-litert
-
       - uses: actions/setup-java@v4
         with:
           java-version: '17'
@@ -329,16 +297,18 @@ jobs:
         working-directory: tauri-cblite-litert
         run: pnpm tauri android init
 
-      - name: Build Android APK
+      # --apk is a Tauri-level flag that Tauri CLI 2.x incorrectly forwards to
+      # cargo build, causing a build failure. Build the default AAB instead.
+      - name: Build Android AAB
         working-directory: tauri-cblite-litert
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
-        run: pnpm tauri:android:build -- --apk
+        run: pnpm tauri:android:build
 
       - uses: actions/upload-artifact@v4
         with:
-          name: android-apk
-          path: tauri-cblite-litert/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
+          name: android-aab
+          path: tauri-cblite-litert/src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
 
   # ── Web (Vite standalone, no Tauri runtime) ───────────────────────────────────
   # Produces a static site with browser-native ML (mediapipe/transformers.js).
@@ -394,4 +364,4 @@ jobs:
             artifacts/linux-x86_64-deb/*.deb
             artifacts/linux-x86_64-appimage/*.AppImage
             artifacts/linux-aarch64-deb/*.deb
-            artifacts/android-apk/**/*.apk
+            artifacts/android-aab/**/*.aab
