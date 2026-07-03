@@ -275,6 +275,15 @@ jobs:
       - name: Initialize Android project
         run: pnpm tauri android init
 
+      # litertlm-android AAR is compiled with Kotlin 2.3.0; Tauri android init
+      # generates a project with Kotlin 1.9.0 which can only read metadata ≤2.0.0.
+      # Bump the Kotlin version in the project-level build.gradle.kts.
+      - name: Patch build.gradle.kts — upgrade Kotlin to 2.3.0
+        run: |
+          sed -i \
+            's/\("org.jetbrains.kotlin.android" version \)"[^"]*"/\1"2.3.0"/g' \
+            src-tauri/gen/android/build.gradle.kts
+
       # litert and litertlm-android AARs both ship libLiteRt.so; Gradle refuses
       # to merge two copies. Append a packaging block to pick the first one found.
       - name: Patch app/build.gradle.kts — resolve duplicate libLiteRt.so
