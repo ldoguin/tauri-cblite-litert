@@ -148,8 +148,8 @@ jobs:
       # manually so the app falls back to Xenova TTS instead of panicking.
       - name: Disable native TTS (stub marker)
         run: |
-          mkdir -p /usr/lib/tauri-cblite-litert
-          ln -sf /dev/null /usr/lib/tauri-cblite-litert/libspeechd.so.2
+          sudo mkdir -p /usr/lib/tauri-cblite-litert
+          sudo ln -sf /dev/null /usr/lib/tauri-cblite-litert/libspeechd.so.2
 
       # ── Run e2e tests under Xvfb ────────────────────────────────────────────
       # xvfb-run -a picks a free display number automatically.
