@@ -17,11 +17,15 @@ jobs:
       # ── Source ──────────────────────────────────────────────────────────────
       - uses: actions/checkout@v4
 
-      # tauri-plugin-cblite is a path dependency (../../tauri-plugin-cblite).
-      # actions/checkout refuses paths outside GITHUB_WORKSPACE, so use
-      # a plain git clone into the sibling directory Cargo expects.
-      - name: Checkout tauri-plugin-cblite sibling
-        run: git clone https://github.com/ldoguin/tauri-plugin-cblite ../tauri-plugin-cblite
+      # Several path dependencies live in sibling repos outside GITHUB_WORKSPACE:
+      #   ../../tauri-plugin-cblite
+      #   ../../tauri-plugin-litert  (also provides vendor/litert + vendor/litertlm)
+      # actions/checkout refuses paths outside GITHUB_WORKSPACE, so use plain
+      # git clones — they resolve relative to the current working directory.
+      - name: Checkout sibling plugin repos
+        run: |
+          git clone https://github.com/ldoguin/tauri-plugin-cblite ../tauri-plugin-cblite
+          git clone https://github.com/ldoguin/tauri-plugin-litert ../tauri-plugin-litert
 
       # ── System runtime deps ──────────────────────────────────────────────────
       # webkit2gtk-driver  → WebKitWebDriver binary (used instead of tauri-driver)
