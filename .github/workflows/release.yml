@@ -316,12 +316,19 @@ jobs:
       # subproject listed in tauri.settings.gradle (including cargo-registry paths).
       - name: Patch all Android modules — migrate kotlinOptions to compilerOptions
         run: |
+          # Cargo sets registry source files read-only (444). Make the whole
+          # cargo source tree writable so the Python script can edit them.
+          chmod -R u+w ~/.cargo/registry/src ~/.cargo/git/checkouts 2>/dev/null || true
+
           python3 - <<'EOF'
-          import pathlib, re, subprocess
+          import pathlib, re
 
           def patch_kotlin_options(f):
-              subprocess.run(["chmod", "+w", str(f)], capture_output=True)
-              t = f.read_text()
+              try:
+                  t = f.read_text()
+              except PermissionError as e:
+                  print(f"SKIP (permission denied): {f}: {e}")
+                  return False
               if 'kotlinOptions' not in t:
                   return False
               m = re.search(r'kotlinOptions\s*\{[^}]*jvmTarget\s*=\s*"([^"]+)"', t, re.DOTALL)
