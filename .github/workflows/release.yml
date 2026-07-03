@@ -275,24 +275,41 @@ jobs:
       - name: Initialize Android project
         run: pnpm tauri android init
 
-      # litertlm-android AAR is compiled with Kotlin 2.3.0; Tauri android init
-      # generates a project with Kotlin 1.9.0 which can only read metadata ≤2.0.0.
-      # The version can live in build.gradle.kts (inline) or libs.versions.toml
-      # (version catalog). Patch whichever exists.
+      # litertlm-android 0.11.0 is compiled with Kotlin 2.3.0 metadata;
+      # tauri android init generates a project with Kotlin 1.9.0 (buildscript
+      # classpath format) which can only read metadata ≤2.0.0.
+      # Use Python to match BOTH classpath and plugins-block formats reliably.
       - name: Patch Android project — upgrade Kotlin to 2.3.0
         run: |
-          ROOT=src-tauri/gen/android
-          # Inline version in project build.gradle.kts
-          sed -i \
-            's/id("org.jetbrains.kotlin.android") version "[^"]*"/id("org.jetbrains.kotlin.android") version "2.3.0"/g' \
-            "$ROOT/build.gradle.kts" 2>/dev/null || true
-          # Version catalog (Gradle 7+ style)
-          TOML="$ROOT/gradle/libs.versions.toml"
-          if [[ -f "$TOML" ]]; then
-            sed -i 's/^\(kotlin\s*=\s*\)"[^"]*"/\1"2.3.0"/' "$TOML"
-          fi
-          echo "Kotlin version after patch:"
-          grep -rh "kotlin" "$ROOT/build.gradle.kts" "$TOML" 2>/dev/null || true
+          python3 - <<'EOF'
+          import pathlib, re, sys
+
+          root = pathlib.Path("src-tauri/gen/android")
+
+          for f in root.rglob("*.gradle.kts"):
+              t = f.read_text()
+              before = t
+              # buildscript-classpath format: classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:X.Y.Z")
+              t = re.sub(r'(kotlin-gradle-plugin:)[^"]+', r'\g<1>2.3.0', t)
+              # plugins-block format: id("org.jetbrains.kotlin.android") version "X.Y.Z"
+              t = re.sub(r'(id\("org\.jetbrains\.kotlin(?:\.android)?"\)\s+version\s+")[^"]+', r'\g<1>2.3.0', t)
+              if t != before:
+                  f.write_text(t)
+                  print(f"Patched {f}")
+
+          for f in root.rglob("*.toml"):
+              t = f.read_text()
+              before = t
+              t = re.sub(r'^(kotlin\s*=\s*")[^"]+', r'\g<1>2.3.0', t, flags=re.MULTILINE)
+              if t != before:
+                  f.write_text(t)
+                  print(f"Patched {f}")
+
+          print("\n=== build.gradle.kts after patch ===")
+          bgk = root / "build.gradle.kts"
+          if bgk.exists():
+              print(bgk.read_text())
+          EOF
 
       # litert and litertlm-android AARs both ship libLiteRt.so; Gradle refuses
       # to merge two copies. Append a packaging block to pick the first one found.
