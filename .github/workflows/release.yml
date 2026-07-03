@@ -301,19 +301,18 @@ jobs:
         working-directory: tauri-cblite-litert
         run: pnpm tauri android init
 
-      # --apk is a Tauri-level flag that Tauri CLI 2.x incorrectly forwards to
-      # cargo build, causing a build failure. Build the default AAB instead.
+      # Use --aab for Google Play format and short ABI names per Tauri docs.
       # Restrict to 64-bit ABIs — cblite has no prebuilt libs for armv7/i686.
       - name: Build Android AAB
         working-directory: tauri-cblite-litert
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
-        run: pnpm tauri:android:build -- --target aarch64-linux-android --target x86_64-linux-android
+        run: pnpm tauri:android:build -- --aab --target aarch64 --target x86_64
 
       - uses: actions/upload-artifact@v4
         with:
           name: android-aab
-          path: tauri-cblite-litert/src-tauri/gen/android/app/build/outputs/bundle/**/*.aab
+          path: tauri-cblite-litert/src-tauri/gen/android/app/build/outputs/bundle/universalRelease/app-universal-release.aab
 
   # ── Web (Vite standalone, no Tauri runtime) ───────────────────────────────────
   # Produces a static site with browser-native ML (mediapipe/transformers.js).
@@ -369,4 +368,4 @@ jobs:
             artifacts/linux-x86_64-deb/*.deb
             artifacts/linux-x86_64-appimage/*.AppImage
             artifacts/linux-aarch64-deb/*.deb
-            artifacts/android-aab/**/*.aab
+            artifacts/android-aab/*.aab
