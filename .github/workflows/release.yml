@@ -311,6 +311,48 @@ jobs:
               print(bgk.read_text())
           EOF
 
+      # Kotlin 2.3.0 removed the kotlinOptions.jvmTarget String setter.
+      # tauri android init generates the old DSL; migrate to compilerOptions.
+      - name: Patch app/build.gradle.kts — migrate kotlinOptions to compilerOptions
+        run: |
+          python3 - <<'EOF'
+          import pathlib, re
+
+          f = pathlib.Path("src-tauri/gen/android/app/build.gradle.kts")
+          t = f.read_text()
+
+          # Only patch if the old API is still present
+          if 'kotlinOptions' in t:
+              # Extract jvmTarget value (e.g. "1.8")
+              m = re.search(r'kotlinOptions\s*\{[^}]*jvmTarget\s*=\s*"([^"]+)"', t, re.DOTALL)
+              jvm_ver = m.group(1).replace('.', '_') if m else '1_8'
+
+              # Remove the kotlinOptions block (wherever it sits — inside or outside android {})
+              t = re.sub(r'\n?\s*kotlinOptions\s*\{[^}]*\}', '', t, flags=re.DOTALL)
+
+              # Add JvmTarget import if missing
+              if 'JvmTarget' not in t:
+                  t = re.sub(
+                      r'(import java\.util\.Properties)',
+                      r'\1\nimport org.jetbrains.kotlin.gradle.dsl.JvmTarget',
+                      t, count=1
+                  )
+                  if 'JvmTarget' not in t:
+                      t = 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' + t
+
+              # Append top-level compilerOptions block if not already present
+              if 'compilerOptions' not in t:
+                  t += f'\nkotlin {{\n    compilerOptions {{\n        jvmTarget.set(JvmTarget.JVM_{jvm_ver})\n    }}\n}}\n'
+
+              f.write_text(t)
+              print(f"Patched kotlinOptions → compilerOptions (JVM_{jvm_ver})")
+          else:
+              print("kotlinOptions not found — skipping (already uses compilerOptions DSL)")
+
+          print("\n=== app/build.gradle.kts after patch ===")
+          print(f.read_text())
+          EOF
+
       # litert and litertlm-android AARs both ship libLiteRt.so; Gradle refuses
       # to merge two copies. Append a packaging block to pick the first one found.
       - name: Patch app/build.gradle.kts — resolve duplicate libLiteRt.so
