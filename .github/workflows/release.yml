@@ -275,27 +275,30 @@ jobs:
       - name: Initialize Android project
         run: pnpm tauri android init
 
-      # tauri android init generates a project with Kotlin 1.9.0 which cannot
-      # read litertlm-android 0.11.0's Kotlin 2.3.0 metadata.
-      # Strategy: upgrade to Kotlin 2.2.0 (kotlinOptions still valid — only
-      # deprecated, not removed) then inject -Xskip-metadata-version-check
-      # globally so the 2.3.0 AAR metadata is accepted without patching
-      # any cargo-registry files.
-      - name: Patch Android project — Kotlin 2.2.0 + skip-metadata-version-check
+      # tauri android init generates Kotlin 1.9.0 which can't read litertlm's
+      # Kotlin 2.3.0 metadata. We upgrade to KGP 2.1.21:
+      #   • kotlinOptions{} is a deprecation WARNING in 2.1.x (not an ERROR —
+      #     that only happened in 2.2.0), so tauri-android and plugin modules
+      #     that still use it continue to compile.
+      #   • We append a subprojects block using the non-deprecated compilerOptions
+      #     DSL to add -Xskip-metadata-version-check, allowing the 2.1.x compiler
+      #     to accept litertlm's 2.3.0 AAR metadata without touching any files
+      #     outside of src-tauri/gen/android/.
+      - name: Patch Android project — Kotlin 2.1.21 + skip-metadata-version-check
         run: |
           python3 - <<'EOF'
           import pathlib, re
 
           root = pathlib.Path("src-tauri/gen/android")
 
-          # ── 1. Upgrade Kotlin plugin to 2.2.0 ──────────────────────────────
+          # ── 1. Upgrade Kotlin plugin to 2.1.21 ─────────────────────────────
           for f in root.rglob("*.gradle.kts"):
               t = f.read_text()
               before = t
               # buildscript-classpath format
-              t = re.sub(r'(kotlin-gradle-plugin:)[^"]+', r'\g<1>2.2.0', t)
+              t = re.sub(r'(kotlin-gradle-plugin:)[^"]+', r'\g<1>2.1.21', t)
               # plugins-block format
-              t = re.sub(r'(id\("org\.jetbrains\.kotlin(?:\.android)?"\)\s+version\s+")[^"]+', r'\g<1>2.2.0', t)
+              t = re.sub(r'(id\("org\.jetbrains\.kotlin(?:\.android)?"\)\s+version\s+")[^"]+', r'\g<1>2.1.21', t)
               if t != before:
                   f.write_text(t)
                   print(f"Kotlin version patched: {f}")
@@ -303,29 +306,28 @@ jobs:
           for f in root.rglob("*.toml"):
               t = f.read_text()
               before = t
-              t = re.sub(r'^(kotlin\s*=\s*")[^"]+', r'\g<1>2.2.0', t, flags=re.MULTILINE)
+              t = re.sub(r'^(kotlin\s*=\s*")[^"]+', r'\g<1>2.1.21', t, flags=re.MULTILINE)
               if t != before:
                   f.write_text(t)
                   print(f"Kotlin version patched: {f}")
 
-          # ── 2. Add -Xskip-metadata-version-check to ALL subprojects ────────
-          # Appended to the root build.gradle.kts so it applies globally without
-          # touching any cargo-registry or git-checkout files.
+          # ── 2. Add -Xskip-metadata-version-check globally ──────────────────
+          # Appended to root build.gradle.kts; uses the new compilerOptions DSL
+          # (available since KGP 2.0) so it doesn't trigger its own deprecation.
           bgk = root / "build.gradle.kts"
           if bgk.exists():
               t = bgk.read_text()
               flag = "-Xskip-metadata-version-check"
               if flag not in t:
                   t += f"""
-          subprojects {{
-              tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {{
-                  @Suppress("DEPRECATION")
-                  kotlinOptions {{
-                      freeCompilerArgs = freeCompilerArgs + listOf("{flag}")
-                  }}
-              }}
-          }}
-          """
+subprojects {{
+    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {{
+        compilerOptions {{
+            freeCompilerArgs.add("{flag}")
+        }}
+    }}
+}}
+"""
                   bgk.write_text(t)
                   print("Appended skip-metadata-version-check to root build.gradle.kts")
 
