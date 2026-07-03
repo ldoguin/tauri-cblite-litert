@@ -23,7 +23,7 @@ hex = "0.4"
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
-tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "1b6b9b6acd42ffa24dc32089d6b3b03b0db02f7c", features = ["native-cbl"] }
+tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "1f2b3bb3a85bb613b3c1127352b74a68b02806e5", features = ["native-cbl"] }
 tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "fea490a6ac7ef0b822411faa5ebfb5b1fe42bc88" }
 tauri-plugin-tts = "0.1.11"
 serde = { version = "1", features = ["derive"] }

@@ -574,8 +574,8 @@ dependencies = [
 
 [[package]]
 name = "couchbase_lite"
-version = "4.0.3-1"
-source = "git+https://github.com/ldoguin/couchbase-lite-rust?rev=6a8c7c5#6a8c7c51e76efc193b0382346ae81ae52f0239ba"
+version = "4.1.0-0"
+source = "git+https://github.com/ldoguin/couchbase-lite-rust?rev=6973ec9b8316685b1da1067670c4386484e5d95f#6973ec9b8316685b1da1067670c4386484e5d95f"
 dependencies = [
  "bindgen",
  "bitflags 2.11.1",
@@ -3974,7 +3974,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-cblite"
 version = "0.1.0"
-source = "git+https://github.com/ldoguin/tauri-plugin-cblite?rev=1b6b9b6acd42ffa24dc32089d6b3b03b0db02f7c#1b6b9b6acd42ffa24dc32089d6b3b03b0db02f7c"
+source = "git+https://github.com/ldoguin/tauri-plugin-cblite?rev=1f2b3bb3a85bb613b3c1127352b74a68b02806e5#1f2b3bb3a85bb613b3c1127352b74a68b02806e5"
 dependencies = [
  "base64 0.22.1",
  "couchbase_lite",
