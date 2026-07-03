@@ -272,9 +272,11 @@ jobs:
           node-version: '22'
           cache: 'pnpm'
           cache-dependency-path: tauri-cblite-litert/pnpm-lock.yaml
+      # couchbase-lite-rust only ships prebuilt libs for 64-bit Android targets.
+      # armv7-linux-androideabi and i686-linux-android are not supported.
       - uses: dtolnay/rust-toolchain@stable
         with:
-          targets: aarch64-linux-android,armv7-linux-androideabi,x86_64-linux-android,i686-linux-android
+          targets: aarch64-linux-android,x86_64-linux-android
 
       - uses: actions/cache@v4
         with:
