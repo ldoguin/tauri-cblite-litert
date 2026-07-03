@@ -319,15 +319,17 @@ jobs:
               t = bgk.read_text()
               flag = "-Xskip-metadata-version-check"
               if flag not in t:
-                  t += f"""
-subprojects {{
-    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {{
-        compilerOptions {{
-            freeCompilerArgs.add("{flag}")
-        }}
-    }}
-}}
-"""
+                  t += "\n".join([
+                      "",
+                      "subprojects {",
+                      "    tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {",
+                      "        compilerOptions {",
+                      f'            freeCompilerArgs.add("{flag}")',
+                      "        }",
+                      "    }",
+                      "}",
+                      "",
+                  ])
                   bgk.write_text(t)
                   print("Appended skip-metadata-version-check to root build.gradle.kts")
 
