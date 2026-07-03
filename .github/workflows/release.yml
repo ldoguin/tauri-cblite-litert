@@ -275,92 +275,62 @@ jobs:
       - name: Initialize Android project
         run: pnpm tauri android init
 
-      # litertlm-android 0.11.0 is compiled with Kotlin 2.3.0 metadata;
-      # tauri android init generates a project with Kotlin 1.9.0 (buildscript
-      # classpath format) which can only read metadata ≤2.0.0.
-      # Use Python to match BOTH classpath and plugins-block formats reliably.
-      - name: Patch Android project — upgrade Kotlin to 2.3.0
+      # tauri android init generates a project with Kotlin 1.9.0 which cannot
+      # read litertlm-android 0.11.0's Kotlin 2.3.0 metadata.
+      # Strategy: upgrade to Kotlin 2.2.0 (kotlinOptions still valid — only
+      # deprecated, not removed) then inject -Xskip-metadata-version-check
+      # globally so the 2.3.0 AAR metadata is accepted without patching
+      # any cargo-registry files.
+      - name: Patch Android project — Kotlin 2.2.0 + skip-metadata-version-check
         run: |
           python3 - <<'EOF'
-          import pathlib, re, sys
+          import pathlib, re
 
           root = pathlib.Path("src-tauri/gen/android")
 
+          # ── 1. Upgrade Kotlin plugin to 2.2.0 ──────────────────────────────
           for f in root.rglob("*.gradle.kts"):
               t = f.read_text()
               before = t
-              # buildscript-classpath format: classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:X.Y.Z")
-              t = re.sub(r'(kotlin-gradle-plugin:)[^"]+', r'\g<1>2.3.0', t)
-              # plugins-block format: id("org.jetbrains.kotlin.android") version "X.Y.Z"
-              t = re.sub(r'(id\("org\.jetbrains\.kotlin(?:\.android)?"\)\s+version\s+")[^"]+', r'\g<1>2.3.0', t)
+              # buildscript-classpath format
+              t = re.sub(r'(kotlin-gradle-plugin:)[^"]+', r'\g<1>2.2.0', t)
+              # plugins-block format
+              t = re.sub(r'(id\("org\.jetbrains\.kotlin(?:\.android)?"\)\s+version\s+")[^"]+', r'\g<1>2.2.0', t)
               if t != before:
                   f.write_text(t)
-                  print(f"Patched {f}")
+                  print(f"Kotlin version patched: {f}")
 
           for f in root.rglob("*.toml"):
               t = f.read_text()
               before = t
-              t = re.sub(r'^(kotlin\s*=\s*")[^"]+', r'\g<1>2.3.0', t, flags=re.MULTILINE)
+              t = re.sub(r'^(kotlin\s*=\s*")[^"]+', r'\g<1>2.2.0', t, flags=re.MULTILINE)
               if t != before:
                   f.write_text(t)
-                  print(f"Patched {f}")
+                  print(f"Kotlin version patched: {f}")
 
-          print("\n=== build.gradle.kts after patch ===")
+          # ── 2. Add -Xskip-metadata-version-check to ALL subprojects ────────
+          # Appended to the root build.gradle.kts so it applies globally without
+          # touching any cargo-registry or git-checkout files.
           bgk = root / "build.gradle.kts"
           if bgk.exists():
-              print(bgk.read_text())
-          EOF
+              t = bgk.read_text()
+              flag = "-Xskip-metadata-version-check"
+              if flag not in t:
+                  t += f"""
+          subprojects {{
+              tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile>().configureEach {{
+                  @Suppress("DEPRECATION")
+                  kotlinOptions {{
+                      freeCompilerArgs = freeCompilerArgs + listOf("{flag}")
+                  }}
+              }}
+          }}
+          """
+                  bgk.write_text(t)
+                  print("Appended skip-metadata-version-check to root build.gradle.kts")
 
-      # Kotlin 2.3.0 removed the kotlinOptions.jvmTarget String setter.
-      # Patch ALL Android modules: our app, tauri-android, and every plugin
-      # subproject listed in tauri.settings.gradle (including cargo-registry paths).
-      - name: Patch all Android modules — migrate kotlinOptions to compilerOptions
-        run: |
-          # Cargo sets registry source files read-only (444). Make the whole
-          # cargo source tree writable so the Python script can edit them.
-          chmod -R u+w ~/.cargo/registry/src ~/.cargo/git/checkouts 2>/dev/null || true
-
-          python3 - <<'EOF'
-          import pathlib, re
-
-          def patch_kotlin_options(f):
-              try:
-                  t = f.read_text()
-              except PermissionError as e:
-                  print(f"SKIP (permission denied): {f}: {e}")
-                  return False
-              if 'kotlinOptions' not in t:
-                  return False
-              m = re.search(r'kotlinOptions\s*\{[^}]*jvmTarget\s*=\s*"([^"]+)"', t, re.DOTALL)
-              jvm_ver = m.group(1).replace('.', '_') if m else '1_8'
-              t = re.sub(r'\n?\s*kotlinOptions\s*\{[^}]*\}', '', t, flags=re.DOTALL)
-              if 'JvmTarget' not in t:
-                  if 'import java.util.Properties' in t:
-                      t = t.replace(
-                          'import java.util.Properties',
-                          'import java.util.Properties\nimport org.jetbrains.kotlin.gradle.dsl.JvmTarget'
-                      )
-                  else:
-                      t = 'import org.jetbrains.kotlin.gradle.dsl.JvmTarget\n' + t
-              if 'compilerOptions' not in t:
-                  t += f'\nkotlin {{\n    compilerOptions {{\n        jvmTarget.set(JvmTarget.JVM_{jvm_ver})\n    }}\n}}\n'
-              f.write_text(t)
-              return True
-
-          # Collect all Android module directories: generated project + all subprojects
-          dirs = [pathlib.Path("src-tauri/gen/android")]
-          settings = pathlib.Path("src-tauri/gen/android/tauri.settings.gradle")
-          if settings.exists():
-              for m in re.finditer(r"projectDir\s*=\s*new File\(['\"]([^'\"]+)['\"]", settings.read_text()):
-                  d = pathlib.Path(m.group(1))
-                  if d.exists():
-                      dirs.append(d)
-                      print(f"Found subproject: {d}")
-
-          for d in dirs:
-              for f in d.rglob("*.gradle.kts"):
-                  if patch_kotlin_options(f):
-                      print(f"Patched: {f}")
+          print("\n=== build.gradle.kts after patch ===")
+          print(bgk.read_text())
           EOF
 
       # litert and litertlm-android AARs both ship libLiteRt.so; Gradle refuses
