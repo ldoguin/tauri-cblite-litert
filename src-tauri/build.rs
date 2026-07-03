@@ -209,6 +209,60 @@ fn linux_fixups() {
     // This path is absolute and correct for the machine running this build.
     println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out_dir.display());
     println!("cargo:rustc-link-search=native={}", out_dir.display());
+
+    // ── Populate bundle-libs/ for Tauri's deb bundler ────────────────────────
+    // tauri.conf.json references bundle-libs/*.so as the source files for the
+    // deb `files` section. build.rs runs before the Tauri bundler, so copying
+    // here ensures the files exist when Tauri packages the .deb.
+    let bundle_libs = std::path::PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").unwrap()
+    ).join("bundle-libs");
+    std::fs::create_dir_all(&bundle_libs).expect("create bundle-libs dir");
+
+    for name in &[
+        "libLiteRtLmC.so",
+        "libGemmaModelConstraintProvider.so",
+        "libLiteRt.so",
+        "libLiteRtWebGpuAccelerator.so",
+        "libLiteRtTopKWebGpuSampler.so",
+    ] {
+        let src = out_dir.join(name);
+        let dst = bundle_libs.join(name);
+        if src.exists() && file_size(&src) != file_size(&dst) {
+            std::fs::copy(&src, &dst)
+                .unwrap_or_else(|e| panic!("copy {name} to bundle-libs: {e}"));
+        }
+    }
+
+    // libcblite.so.4 — find it in the cargo git checkout.
+    let cblite_so = (|| {
+        let entries = std::fs::read_dir(&cblite_git).ok()?;
+        for entry in entries.flatten() {
+            if !entry.file_name().to_string_lossy().starts_with("couchbase-lite-rust") {
+                continue;
+            }
+            if let Ok(commits) = std::fs::read_dir(entry.path()) {
+                for commit in commits.flatten() {
+                    let candidate = commit.path()
+                        .join("libcblite_community").join("lib").join(&target)
+                        .join("libcblite.so.4");
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
+    })();
+    if let Some(src) = cblite_so {
+        let dst = bundle_libs.join("libcblite.so.4");
+        if file_size(&src) != file_size(&dst) {
+            std::fs::copy(&src, &dst)
+                .unwrap_or_else(|e| panic!("copy libcblite.so.4 to bundle-libs: {e}"));
+        }
+    } else {
+        println!("cargo:warning=build.rs: libcblite.so.4 not found in cargo git checkouts");
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
