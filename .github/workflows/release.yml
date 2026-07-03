@@ -275,6 +275,32 @@ jobs:
       - name: Initialize Android project
         run: pnpm tauri android init
 
+      # tauri-plugin-cblite declares usesCleartextTraffic=true; the app manifest
+      # defaults to false. The merger refuses to pick a winner unless the app
+      # explicitly says which value wins via tools:replace.
+      - name: Patch AndroidManifest — resolve usesCleartextTraffic conflict
+        run: |
+          python3 - <<'EOF'
+          import re, pathlib
+          p = pathlib.Path("src-tauri/gen/android/app/src/main/AndroidManifest.xml")
+          t = p.read_text()
+          # Add tools namespace to <manifest> if not present
+          if 'xmlns:tools=' not in t:
+              t = t.replace(
+                  'xmlns:android="http://schemas.android.com/apk/res/android"',
+                  'xmlns:android="http://schemas.android.com/apk/res/android"\n    xmlns:tools="http://schemas.android.com/tools"'
+              )
+          # Add tools:replace to <application> if not present
+          if 'tools:replace=' not in t:
+              t = re.sub(
+                  r'(<application\b)',
+                  r'\1\n        tools:replace="android:usesCleartextTraffic"',
+                  t, count=1
+              )
+          p.write_text(t)
+          print("Patched:", p)
+          EOF
+
       - uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
