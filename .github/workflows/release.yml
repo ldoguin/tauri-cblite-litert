@@ -303,11 +303,12 @@ jobs:
 
       # --apk is a Tauri-level flag that Tauri CLI 2.x incorrectly forwards to
       # cargo build, causing a build failure. Build the default AAB instead.
+      # Restrict to 64-bit ABIs — cblite has no prebuilt libs for armv7/i686.
       - name: Build Android AAB
         working-directory: tauri-cblite-litert
         env:
           NDK_HOME: ${{ env.NDK_HOME }}
-        run: pnpm tauri:android:build
+        run: pnpm tauri:android:build -- --target aarch64 --target x86_64
 
       - uses: actions/upload-artifact@v4
         with:
