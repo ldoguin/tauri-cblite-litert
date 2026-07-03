@@ -275,6 +275,22 @@ jobs:
       - name: Initialize Android project
         run: pnpm tauri android init
 
+      # litert and litertlm-android AARs both ship libLiteRt.so; Gradle refuses
+      # to merge two copies. Append a packaging block to pick the first one found.
+      - name: Patch app/build.gradle.kts — resolve duplicate libLiteRt.so
+        run: |
+          cat >> src-tauri/gen/android/app/build.gradle.kts <<'GRADLE'
+
+          // litert and litertlm-android AARs both ship libLiteRt.so.
+          android {
+              packaging {
+                  jniLibs {
+                      pickFirsts += setOf("**/libLiteRt.so")
+                  }
+              }
+          }
+          GRADLE
+
       # tauri-plugin-cblite declares usesCleartextTraffic=true; the app manifest
       # defaults to false. The merger refuses to pick a winner unless the app
       # explicitly says which value wins via tools:replace.
