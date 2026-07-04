@@ -731,28 +731,10 @@ pub fn run() {
             reqwest::Client::new()
         });
 
-    // On Linux, our .deb postinstall creates a stub symlink at
-    // /usr/lib/tauri-cblite-litert/libspeechd.so.2 only when real
-    // speech-dispatcher is absent.  If that symlink exists, spd_open()
-    // returns NULL and the TTS plugin would fail to initialise — skip it
-    // so the frontend falls back to Xenova TTS instead.
-    #[cfg(target_os = "linux")]
-    let native_tts_ok = !std::path::Path::new(
-        "/usr/lib/tauri-cblite-litert/libspeechd.so.2",
-    ).is_symlink();
-    #[cfg(not(target_os = "linux"))]
-    let native_tts_ok = true;
-
-    let mut builder = tauri::Builder::default()
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_cblite::init())
         .plugin(tauri_plugin_litert::init());
-
-    if native_tts_ok {
-        builder = builder.plugin(tauri_plugin_tts::init());
-    } else {
-        eprintln!("info: speech-dispatcher not installed — native TTS disabled, using Xenova fallback");
-    }
 
     builder
         .manage(HttpClient(http_client))
