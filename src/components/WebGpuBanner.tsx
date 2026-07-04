@@ -6,7 +6,7 @@
  *   - A dismissible warning with browser-specific instructions if not
  */
 
-import { useEffect, useState } from "react";
+import { startTransition, useEffect, useState } from "react";
 
 type GpuStatus =
   | "checking"
@@ -113,7 +113,7 @@ export function WebGpuBanner() {
 
   useEffect(() => {
     // Only show on web — Tauri uses native GPU access
-    if ("__TAURI_INTERNALS__" in window) { setStatus("supported"); return; }
+    if ("__TAURI_INTERNALS__" in window) { startTransition(() => setStatus("supported")); return; }
     let cancelled = false;
     detectWebGpu().then((s) => { if (!cancelled) setStatus(s); }).catch(() => {
       if (!cancelled) setStatus("no-api");

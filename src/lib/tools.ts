@@ -292,26 +292,32 @@ export async function pickBestSearxInstance(): Promise<string> {
   if (candidates.length === 0) throw new Error("No healthy SearXNG instances found.");
   candidates.sort((a, b) => a.median - b.median);
 
-  // Probe candidates in order; return the first that actually serves JSON.
-  // Use a short delay between probes to avoid triggering per-IP rate limits.
-  const top = candidates.slice(0, 30);
-  for (const { url } of top) {
-    try {
-      const testUrl = `${url}/search?q=wikipedia&format=json&categories=general&engines=google&language=en-US`;
-      const resp = await tauriFetch(testUrl);
-      const json = JSON.parse(resp) as { results?: unknown[] };
-      if (Array.isArray(json.results)) return url;
-    } catch {
-      // instance unavailable, rate-limited, or JSON disabled — try next
-    }
-    // Small pause to avoid hammering instances and triggering rate limits
-    await new Promise((r) => setTimeout(r, 300));
-  }
-
-  throw new Error(
-    "None of the tested SearXNG instances responded correctly. " +
-    "Try again later, or enter an instance URL manually from https://searx.space/",
+  // Probe the top candidates in parallel; return the first that serves JSON.
+  // A 5-second hard timeout prevents indefinite hangs when all instances are slow.
+  const top = candidates.slice(0, 15);
+  const timeout = new Promise<never>((_, reject) =>
+    setTimeout(() => reject(new Error("probe timeout")), 5_000),
   );
+
+  const probeOne = async (url: string): Promise<string> => {
+    const testUrl = `${url}/search?q=wikipedia&format=json&categories=general&engines=google&language=en-US`;
+    const resp = await tauriFetch(testUrl);
+    const json = JSON.parse(resp) as { results?: unknown[] };
+    if (!Array.isArray(json.results)) throw new Error("no results array");
+    return url;
+  };
+
+  try {
+    return await Promise.race([
+      Promise.any(top.map(({ url }) => probeOne(url))),
+      timeout,
+    ]);
+  } catch {
+    throw new Error(
+      "None of the tested SearXNG instances responded correctly. " +
+      "Try again later, or enter an instance URL manually from https://searx.space/",
+    );
+  }
 }
 
 /** SearXNG JSON result shape (subset we care about). */
@@ -560,18 +566,29 @@ export type { SourceToolDeps } from "./skills/source-tools";
 
 // ── Registry ───────────────────────────────────────────────────────────────
 
-function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
+import { isTauri } from "./db";
 
 /**
  * On Tauri: fetch via the Rust `fetch_url` command (bypasses WebView CORS).
+ * The Rust command has no native cancellation; we race it against the signal
+ * so the JS side stops waiting on abort even if the Rust task continues.
  * On web: plain fetch with the provided signal.
  */
 async function tauriFetch(url: string, signal?: AbortSignal): Promise<string> {
   if (isTauri()) {
     const { invoke } = await import("@tauri-apps/api/core");
-    return invoke<string>("fetch_url", { url });
+    const fetchPromise = invoke<string>("fetch_url", { url });
+    if (!signal) return fetchPromise;
+    // Race the invoke against the abort signal.
+    return Promise.race([
+      fetchPromise,
+      new Promise<never>((_, reject) => {
+        if (signal.aborted) { reject(signal.reason ?? new DOMException("Aborted", "AbortError")); return; }
+        signal.addEventListener("abort", () =>
+          reject(signal.reason ?? new DOMException("Aborted", "AbortError")),
+        { once: true });
+      }),
+    ]);
   }
   const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);

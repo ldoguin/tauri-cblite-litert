@@ -81,9 +81,8 @@ export function getActiveContextLength(): number { return activeContextLength; }
 export function getWebLlm(): LlmInference | null { return webLlm; }
 export function isWebLlmLoading(): boolean { return webLlmLoading; }
 
-export function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
+export { isTauri } from "./db";
+import { isTauri } from "./db";
 
 export function getActiveBackend(): LlmBackend {
   if (isTauri() && activeLmModelId) return "tauri";

@@ -13,7 +13,7 @@
  */
 
 import { runInference } from "tauri-plugin-litert-api";
-import { listKnowledgeChunks, listEmbeddedMessages, getRagPoolVersion } from "./db";
+import { isTauri, listKnowledgeChunks, listEmbeddedMessages, getRagPoolVersion } from "./db";
 
 
 // ── Embedding backend state ────────────────────────────────────────────────
@@ -415,14 +415,15 @@ export function cosineSimilarity(a: number[], b: number[]): number {
   return denom === 0 ? 0 : dot / denom;
 }
 
-function isTauri(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
+
 
 // ── Chunking ───────────────────────────────────────────────────────────────
 
-export const DEFAULT_CHUNK_SIZE = 400;
-export const DEFAULT_CHUNK_OVERLAP = 80;
+// BERT-base-uncased has a 128-token limit. At ~4 chars/token, 300 chars is a
+// conservative ceiling that avoids silent truncation inside the tokenizer.
+// The overlap preserves cross-boundary context without duplicating too much text.
+export const DEFAULT_CHUNK_SIZE = 300;
+export const DEFAULT_CHUNK_OVERLAP = 60;
 
 export function splitIntoChunks(
   text: string,

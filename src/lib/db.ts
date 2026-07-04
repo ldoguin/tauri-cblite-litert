@@ -300,7 +300,7 @@ export async function loadConfig(): Promise<ModelConfig> {
       throw e;
     });
   if (!doc) return { ...DEFAULT_MODEL_CONFIG };
-  const { _id: _unused, ...rest } = doc as Record<string, unknown>;
+  const { _id: _, ...rest } = doc as Record<string, unknown>;
   return { ...DEFAULT_MODEL_CONFIG, ...(rest as Partial<ModelConfig>) };
 }
 
@@ -400,10 +400,10 @@ export async function deleteConversation(id: string): Promise<void> {
 
 // ── Messages ───────────────────────────────────────────────────────────────
 
-// Default raised from 500 to 10k — 500 silently truncated LLM history and
-// the context-window bar for long conversations. 10k covers realistic usage
-// while still bounding memory for pathological cases.
-export async function listMessages(conversationId: string, limit = 10_000, offset = 0): Promise<Message[]> {
+// Default limit of 200 covers realistic conversation lengths without loading
+// the entire history into memory. LLM context truncation is handled by
+// truncateToFitTokens() in llm.ts — not by this limit.
+export async function listMessages(conversationId: string, limit = 200, offset = 0): Promise<Message[]> {
   if (!isTauri()) {
     return (webStore.list(COL_MESSAGES) as unknown as Message[])
       .filter((m) => m.conversationId === conversationId && !m.isChunk)

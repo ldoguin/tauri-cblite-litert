@@ -7,7 +7,7 @@
  *   - This pane shows the editor for the selected agent
  */
 
-import { useEffect, useRef, useState } from "react";
+import { startTransition, useEffect, useRef, useState } from "react";
 import type { Agent } from "../lib/types";
 import type { Tool } from "../lib/tools";
 
@@ -82,21 +82,24 @@ export function AgentEditorPane({
   const isMountedRef = useRef(false);
   useEffect(() => { isMountedRef.current = true; return () => { isMountedRef.current = false; }; }, []);
 
-  // Populate form when selected agent changes
+  // Populate form when selected agent changes. Batched in startTransition so
+  // multiple setState calls produce a single render pass.
   useEffect(() => {
-    if (agent) {
-      setName(agent.name);
-      setDescription(agent.description ?? "");
-      setSystemPrompt(agent.systemPrompt);
-      setToolIds(agent.toolIds ?? []);
-      setSaveError(null);
-    } else if (isCreate) {
-      setName("");
-      setDescription("");
-      setSystemPrompt("");
-      setToolIds([]);
-      setSaveError(null);
-    }
+    startTransition(() => {
+      if (agent) {
+        setName(agent.name);
+        setDescription(agent.description ?? "");
+        setSystemPrompt(agent.systemPrompt);
+        setToolIds(agent.toolIds ?? []);
+        setSaveError(null);
+      } else if (isCreate) {
+        setName("");
+        setDescription("");
+        setSystemPrompt("");
+        setToolIds([]);
+        setSaveError(null);
+      }
+    });
   }, [editingAgentId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Auto-save on blur for edit mode ────────────────────────────────────────

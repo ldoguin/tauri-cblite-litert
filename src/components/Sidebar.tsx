@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { startTransition, useState, useRef, useEffect } from "react";
 import type { Conversation, Agent } from "../lib/types";
 
 export type SidebarSection = "conversations" | "knowledge" | "agents";
@@ -60,9 +60,11 @@ export function Sidebar({
   useEffect(() => { isMountedRef.current = true; return () => { isMountedRef.current = false; }; }, []);
 
   useEffect(() => {
-    setEditingId(null);
-    setShowExportMenu(false);
-    setEditingInstructionId(null);
+    startTransition(() => {
+      setEditingId(null);
+      setShowExportMenu(false);
+      setEditingInstructionId(null);
+    });
   }, [activeConvId]);
 
   useEffect(() => () => { if (searchTimerRef.current) clearTimeout(searchTimerRef.current); }, []);

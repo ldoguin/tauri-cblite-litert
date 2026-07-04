@@ -38,8 +38,7 @@ import {
   deleteAgent,
 } from "../lib/db";
 import { extractPdfContent, extractPdfPages, renderPdfPage } from "../lib/pdf";
-import { MODEL_CATALOGUE, resolveDefaultModelPaths } from "../lib/modelCache";
-import { DEFAULT_AGENTS } from "../lib/defaultAgents";
+import { MODEL_CATALOGUE } from "../lib/modelCache";
 import { fetchUrlText } from "../lib/urlIngest";
 import {
   embed,
@@ -155,46 +154,41 @@ export function useChat() {
   // read it synchronously without a side-effect inside a state updater.
   const conversationsRef = useRef<Conversation[]>([]);
 
-  // knowledge_search is created once and kept in a ref so it isn't recreated
-  // on every render. It is always available when the embedding engine is ready.
-  const knowledgeSearchToolRef = useRef<Tool | null>(null);
-  if (!knowledgeSearchToolRef.current) {
-    knowledgeSearchToolRef.current = createKnowledgeSearchTool({
-      embed: (text) => embed(text),
-      retrieveTopK: (vec, text, topK, threshold) =>
-        retrieveTopK(vec, text, topK, threshold),
-    });
-  }
+  // knowledge_search, PDF tools, and source tools are created once via useMemo
+  // so they are stable across renders without writing to refs during render.
 
-  // PDF tools are created once; they close over a live getter for knowledgeChunks
-  // so the list stays current without recreating the tool objects.
+  // knowledgeChunksRef gives tool closures a live view of the chunk list
+  // without recreating the tool objects when the list changes.
   const knowledgeChunksRef = useRef<typeof knowledgeChunks>(knowledgeChunks);
-  knowledgeChunksRef.current = knowledgeChunks;
-  const pdfToolsRef = useRef<Tool[]>([]);
-  if (pdfToolsRef.current.length === 0) {
-    pdfToolsRef.current = createPdfTools({
-      getChunks: () => knowledgeChunksRef.current,
-      getPdfPath,
-      readPdfBytes: async (path: string) => {
-        const { invoke } = await import("@tauri-apps/api/core");
-        const b64 = await invoke<string>("read_pdf_bytes", { path });
-        const raw = atob(b64);
-        const bytes = new Uint8Array(raw.length);
-        for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
-        return bytes.buffer;
-      },
-      renderPdfPage: async (buffer: ArrayBuffer, page: number) => renderPdfPage(buffer, page),
-      extractPdfPageText,
-    });
-  }
+  // Sync the ref after render so tool closures always see the latest list.
+  useEffect(() => { knowledgeChunksRef.current = knowledgeChunks; }, [knowledgeChunks]);
 
-  // Source tools: list_knowledge_sources + read_source_chunks
-  const sourceToolsRef = useRef<Tool[]>([]);
-  if (sourceToolsRef.current.length === 0) {
-    sourceToolsRef.current = createSourceTools({
-      getChunks: () => knowledgeChunksRef.current,
-    });
-  }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const knowledgeSearchTool = useMemo<Tool>(() => createKnowledgeSearchTool({
+    embed: (text) => embed(text),
+    retrieveTopK: (vec, text, topK, threshold) => retrieveTopK(vec, text, topK, threshold),
+  }), []);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/refs
+  const pdfTools = useMemo<Tool[]>(() => createPdfTools({
+    getChunks: () => knowledgeChunksRef.current,
+    getPdfPath,
+    readPdfBytes: async (path: string) => {
+      const { invoke } = await import("@tauri-apps/api/core");
+      const b64 = await invoke<string>("read_pdf_bytes", { path });
+      const raw = atob(b64);
+      const bytes = new Uint8Array(raw.length);
+      for (let i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+      return bytes.buffer;
+    },
+    renderPdfPage: async (buffer: ArrayBuffer, page: number) => renderPdfPage(buffer, page),
+    extractPdfPageText,
+  }), []);
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/refs
+  const sourceTools = useMemo<Tool[]>(() => createSourceTools({
+    getChunks: () => knowledgeChunksRef.current,
+  }), []);
 
   // Memoize so sendMessage (and its useCallback deps) aren't recreated on
   // every render — enabledToolIds is a Set so we stringify it as the key.
@@ -205,24 +199,24 @@ export function useChat() {
   const enabledTools = useMemo(() => [
     ...Array.from(enabledToolIds).flatMap((id) => {
       if (id === "knowledge_search") {
-        return knowledgeSearchToolRef.current ? [knowledgeSearchToolRef.current] : [];
+        return [knowledgeSearchTool];
       }
       if (id === "web_search") {
         return [createWebSearchTool(searxngUrl)];
       }
       if (PDF_TOOL_IDS.has(id)) {
-        const t = pdfToolsRef.current.find((pt) => pt.id === id);
+        const t = pdfTools.find((pt) => pt.id === id);
         return t ? [t] : [];
       }
       if (SOURCE_TOOL_IDS.has(id)) {
-        const t = sourceToolsRef.current.find((st) => st.id === id);
+        const t = sourceTools.find((st) => st.id === id);
         return t ? [t] : [];
       }
       const t = getToolById(id);
       return t ? [t] : [];
     }),
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  ], [enabledToolIdsKey, searxngUrl]);
+  ], [enabledToolIdsKey, searxngUrl, knowledgeSearchTool, pdfTools, sourceTools]);
 
   const modelsLoaded = useRef(false);
   // Ref-based guard for sendMessage — prevents concurrent sends even when
@@ -242,120 +236,70 @@ export function useChat() {
 
   // ── Initialisation ───────────────────────────────────────────────────────
 
+  /**
+   * Core init sequence shared by the mount effect and retryInit.
+   * `isCancelled` is called before each async step; when it returns true the
+   * sequence aborts without updating state (safe for both StrictMode remounts
+   * and explicit retries).
+   */
+  const doInit = useCallback(async (isCancelled: () => boolean) => {
+    setStatus("loading-models");
+    const dbDir = await resolveDbDir();
+    await initDatabase(dbDir);
+    if (isCancelled()) return;
+
+    const cfg = await loadConfig();
+    if (isCancelled()) return;
+    setConfigState(cfg);
+
+    const convs = await listConversations();
+    if (isCancelled()) return;
+    setConversations(convs);
+
+    const chunks = await listKnowledgeChunks();
+    if (isCancelled()) return;
+    setKnowledgeChunks(chunks);
+
+    const agentList = await listAgents();
+    if (isCancelled()) return;
+    setAgents(agentList);
+
+    // Restore persisted web API config
+    loadPersistedApiConfig();
+
+    // Initialise embedding engine
+    const embStatus = await initEmbeddings(
+      !isTauri() ? cfg.embeddingModelPath || undefined : undefined,
+    );
+    if (isCancelled()) return;
+    setEmbeddingStatus(embStatus);
+    setEmbeddingBackend(getEmbeddingBackend());
+
+    // Load LiteRT models on Tauri
+    if (cfg.lmModelPath || cfg.embeddingModelPath) {
+      await loadModels(cfg);
+      // Check cancelled BEFORE setting the flag — if the effect was cleaned
+      // up (StrictMode remount or config change) while loadModels was awaiting,
+      // modelsLoaded must stay false so the next mount re-loads correctly.
+      if (isCancelled()) return;
+      modelsLoaded.current = true;
+    }
+
+    if (isCancelled()) return;
+    setLlmBackend(getActiveBackend());
+    setStatus("ready");
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     // Reset mount flag — StrictMode unmounts and remounts, so we must restore
     // it here rather than relying on the initial useRef(true) value.
     isMountedRef.current = true;
     let cancelled = false;
 
-    (async () => {
-      try {
-        setStatus("loading-models");
-        const dbDir = await resolveDbDir();
-        const ftsLanguage = localStorage.getItem("ftsLanguage") ?? "en";
-        await initDatabase(dbDir, ftsLanguage);
-        if (cancelled) return;
-
-        let cfg = await loadConfig();
-        if (cancelled) return;
-
-        // On Tauri, auto-fill empty model paths from any downloaded models.
-        if (isTauri() && (!cfg.lmModelPath || !cfg.embeddingModelPath)) {
-          const defaults = await resolveDefaultModelPaths();
-          let changed = false;
-          if (!cfg.lmModelPath && defaults.lmModelPath) {
-            cfg = { ...cfg, lmModelPath: defaults.lmModelPath };
-            changed = true;
-          }
-          if (!cfg.embeddingModelPath && defaults.embeddingModelPath) {
-            cfg = { ...cfg, embeddingModelPath: defaults.embeddingModelPath };
-            changed = true;
-          }
-          if (changed) saveConfig(cfg).catch(() => {});
-        }
-
-        setConfigState(cfg);
-
-        const convs = await listConversations();
-        if (cancelled) return;
-        setConversations(convs);
-
-        const chunks = await listKnowledgeChunks();
-        if (cancelled) return;
-        setKnowledgeChunks(chunks);
-
-        let agentList = await listAgents();
-        if (cancelled) return;
-        // Seed default agents on first run (empty DB).
-        if (agentList.length === 0) {
-          const now = new Date().toISOString();
-          const seeded = DEFAULT_AGENTS.map((preset) => ({
-            id: uuidv4(),
-            name: preset.name,
-            description: preset.description,
-            systemPrompt: preset.systemPrompt,
-            toolIds: preset.toolIds,
-            createdAt: now,
-            updatedAt: now,
-          }));
-          await Promise.all(seeded.map(saveAgent));
-          agentList = seeded;
-        } else {
-          // Migrate: for each existing preset agent (matched by name), add any
-          // tool IDs that appeared in DEFAULT_AGENTS since the agent was created.
-          // User-added tools are preserved; nothing is removed.
-          const migrations: Promise<void>[] = [];
-          for (const existing of agentList) {
-            const preset = DEFAULT_AGENTS.find((p) => p.name === existing.name);
-            if (!preset) continue;
-            const missing = preset.toolIds.filter((id) => !existing.toolIds.includes(id));
-            const removedSystemPrompt = existing.systemPrompt !== preset.systemPrompt;
-            if (missing.length === 0 && !removedSystemPrompt) continue;
-            const updated = {
-              ...existing,
-              toolIds: [...existing.toolIds, ...missing],
-              systemPrompt: preset.systemPrompt,
-              updatedAt: new Date().toISOString(),
-            };
-            migrations.push(saveAgent(updated).then(() => {
-              const idx = agentList.indexOf(existing);
-              if (idx !== -1) agentList[idx] = updated;
-            }));
-          }
-          if (migrations.length > 0) await Promise.all(migrations);
-        }
-        setAgents(agentList);
-        // Router is always the active responder — agents are config only.
-
-        // Restore persisted web API config
-        loadPersistedApiConfig();
-
-        // Initialise embedding engine
-        const embStatus = await initEmbeddings(
-          !isTauri() ? cfg.embeddingModelPath || undefined : undefined,
-        );
-        if (cancelled) return;
-        setEmbeddingStatus(embStatus);
-        setEmbeddingBackend(getEmbeddingBackend());
-
-        // Load LiteRT models on Tauri.
-        // Guard cancelled BEFORE calling loadModels — if StrictMode cleanup fired
-        // while earlier awaits were in flight (setting cancelled=true), we must
-        // not start Engine::new at all. Concurrent Engine::new calls corrupt the
-        // LiteRT-LM global accelerator registry and make create_conversation return null.
-        if ((cfg.lmModelPath || cfg.embeddingModelPath) && !cancelled) {
-          await loadModels(cfg, availableModels);
-          if (cancelled) return;
-          modelsLoaded.current = true;
-        }
-
-        if (cancelled) return;
-        setLlmBackend(getActiveBackend());
-        setStatus("ready");
-      } catch (err) {
-        if (!cancelled) { setError(String(err)); setStatus("error"); }
-      }
-    })();
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    doInit(() => cancelled).catch((err) => {
+      if (!cancelled) { setError(String(err)); setStatus("error"); }
+    });
 
     return () => {
       cancelled = true;
@@ -363,50 +307,15 @@ export function useChat() {
       sendingRef.current = false;
       unloadModels().catch(() => {});
     };
-  }, []);
+  }, [doInit]);
 
   /** Retry initialisation after a transient startup failure. */
   const retryInit = useCallback(() => {
     setError(null);
-    setStatus("loading-models");
-    (async () => {
-      try {
-        const dbDir = await resolveDbDir();
-        const ftsLanguage = localStorage.getItem("ftsLanguage") ?? "en";
-        await initDatabase(dbDir, ftsLanguage);
-        if (!isMountedRef.current) return;
-        const cfg = await loadConfig();
-        if (!isMountedRef.current) return;
-        setConfigState(cfg);
-        const convs = await listConversations();
-        if (!isMountedRef.current) return;
-        setConversations(convs);
-        const chunks = await listKnowledgeChunks();
-        if (!isMountedRef.current) return;
-        setKnowledgeChunks(chunks);
-        const agentList = await listAgents();
-        if (!isMountedRef.current) return;
-        setAgents(agentList);
-        loadPersistedApiConfig();
-        const embStatus = await initEmbeddings(
-          !isTauri() ? cfg.embeddingModelPath || undefined : undefined,
-        );
-        if (!isMountedRef.current) return;
-        setEmbeddingStatus(embStatus);
-        setEmbeddingBackend(getEmbeddingBackend());
-        if (cfg.lmModelPath || cfg.embeddingModelPath) {
-          await loadModels(cfg, availableModels);
-          if (!isMountedRef.current) return;
-          modelsLoaded.current = true;
-        }
-        if (!isMountedRef.current) return;
-        setLlmBackend(getActiveBackend());
-        setStatus("ready");
-      } catch (err) {
-        if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
-      }
-    })();
-  }, []);
+    doInit(() => !isMountedRef.current).catch((err) => {
+      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+    });
+  }, [doInit]);
 
   // ── Model folder scan ────────────────────────────────────────────────────
 
@@ -740,6 +649,22 @@ export function useChat() {
     }
   }, [config]);
 
+  // ── Background notification ───────────────────────────────────────────────
+  // Declared here (before sendMessage) so it can be called inside the send
+  // callback without a forward-reference / temporal dead zone issue.
+
+  const notifyIfHidden = useCallback((title: string, body: string) => {
+    if (document.visibilityState !== "hidden") return;
+    if (!("Notification" in window)) return;
+    if (Notification.permission === "granted") {
+      new Notification(title, { body, icon: "/icons/icon.png" });
+    } else if (Notification.permission === "default") {
+      Notification.requestPermission().then((perm) => {
+        if (perm === "granted") new Notification(title, { body, icon: "/icons/icon.png" });
+      }).catch(() => { /* permission denied or API unavailable — safe to ignore */ });
+    }
+  }, []);
+
   // ── Send a message ───────────────────────────────────────────────────────
 
   const sendMessage = useCallback(async (text: string, imageDataUrl?: string, historyOverride?: Message[]) => {
@@ -948,9 +873,9 @@ export function useChat() {
     // agent, restrict to that agent's toolIds; otherwise all tools are fair game.
     const allTools = [
       ...ALL_TOOLS,
-      ...(knowledgeSearchToolRef.current ? [knowledgeSearchToolRef.current] : []),
-      ...pdfToolsRef.current,
-      ...sourceToolsRef.current,
+      knowledgeSearchTool,
+      ...pdfTools,
+      ...sourceTools,
       createWebSearchTool(config?.searxngUrl ?? ""),
     ];
 
@@ -1520,20 +1445,6 @@ export function useChat() {
     setTimeout(() => URL.revokeObjectURL(url), 30_000);
   }, [conversations, activeConvId, messages]);
 
-  // ── Background notification ───────────────────────────────────────────────
-
-  const notifyIfHidden = useCallback((title: string, body: string) => {
-    if (document.visibilityState !== "hidden") return;
-    if (!("Notification" in window)) return;
-    if (Notification.permission === "granted") {
-      new Notification(title, { body, icon: "/icons/icon.png" });
-    } else if (Notification.permission === "default") {
-      Notification.requestPermission().then((perm) => {
-        if (perm === "granted") new Notification(title, { body, icon: "/icons/icon.png" });
-      }).catch(() => { /* permission denied or API unavailable — safe to ignore */ });
-    }
-  }, []);
-
   // ── Stop generation ──────────────────────────────────────────────────────
 
   const stopGeneration = useCallback(() => {
@@ -1859,9 +1770,9 @@ export function useChat() {
     streamingContent, lastCompletedResponse, streamingAgentName, streamingTokensPerSec, streamingTokenCount, lastRagChunks, lastToolExecutions,
     ragEnabled, setRagEnabled,
     allTools: [
-      ...(knowledgeSearchToolRef.current ? [knowledgeSearchToolRef.current] : []),
-      ...pdfToolsRef.current,
-      ...sourceToolsRef.current,
+      knowledgeSearchTool,
+      ...pdfTools,
+      ...sourceTools,
       ...ALL_TOOLS,
     ],
     enabledToolIds, setEnabledToolIds,

@@ -201,14 +201,15 @@ async fn download_model(
     file_name: String,
 ) -> Result<String, String> {
     // Cancel any existing download for this model.
-    {
+    let mut cancel_rx = {
         let mut map = downloads.lock();
         if let Some(tx) = map.remove(&model_id) {
             let _ = tx.send(());
         }
-        let (tx, _rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
         map.insert(model_id.clone(), tx);
-    }
+        rx
+    };
 
     // Resolve destination: <appLocalDataDir>/models/<file_name>
     let data_dir = app
@@ -252,15 +253,18 @@ async fn download_model(
     let mut received_bytes: u64 = 0;
 
     loop {
-        // Check for cancellation before each chunk.
-        let cancelled = { !downloads.lock().contains_key(&model_id) };
-        if cancelled {
-            drop(file);
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err("cancelled".into());
-        }
+        // Race the next chunk against the cancellation signal.
+        let chunk_result = tokio::select! {
+            biased;
+            _ = &mut cancel_rx => {
+                drop(file);
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err("cancelled".into());
+            }
+            result = stream.next() => result,
+        };
 
-        match stream.next().await {
+        match chunk_result {
             None => break,
             Some(Err(e)) => {
                 drop(file);
@@ -336,12 +340,20 @@ async fn read_config_import(app: AppHandle) -> Result<Option<String>, String> {
         candidates.push(d.join("config.json"));
     }
 
-    // Android external files dir: /sdcard/Android/data/<package>/files/config.json
-    // Construct from the bundle identifier so it stays correct across package renames.
-    let pkg = app.config().identifier.to_string();
-    candidates.push(std::path::PathBuf::from(format!(
-        "/sdcard/Android/data/{pkg}/files/config.json"
-    )));
+    // Android external files dir fallback. The canonical API is
+    // Environment.getExternalStorageDirectory() (not available via Tauri FFI),
+    // which typically resolves to /storage/emulated/0 on modern devices.
+    // We probe both common mount points; the first that exists wins.
+    // This is a best-effort fallback — internal storage (candidate 0) is preferred.
+    #[cfg(target_os = "android")]
+    {
+        let pkg = app.config().identifier.to_string();
+        for root in &["/storage/emulated/0", "/sdcard"] {
+            candidates.push(std::path::PathBuf::from(format!(
+                "{root}/Android/data/{pkg}/files/config.json"
+            )));
+        }
+    }
 
     for path in &candidates {
         if path.exists() {
@@ -500,9 +512,14 @@ async fn open_pdf_page(path: String, page: u32) -> Result<(), String> {
 async fn write_export_file(app: AppHandle, filename: String, data: String) -> Result<String, String> {
     #[cfg(target_os = "android")]
     let dest = {
+        // Prefer /storage/emulated/0 (canonical on API 29+); fall back to /sdcard symlink.
         let pkg = app.config().identifier.to_string();
-        let base = std::path::PathBuf::from(format!("/sdcard/Android/data/{pkg}/files"));
-        join_within(&base, &filename)?
+        let root = if std::path::Path::new("/storage/emulated/0").exists() {
+            "/storage/emulated/0"
+        } else {
+            "/sdcard"
+        };
+        std::path::PathBuf::from(format!("{root}/Android/data/{pkg}/files/{filename}"))
     };
     #[cfg(not(target_os = "android"))]
     let dest = {

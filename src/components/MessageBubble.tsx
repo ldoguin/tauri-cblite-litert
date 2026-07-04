@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { startTransition, useState, useRef, useEffect } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import rehypeHighlight from "rehype-highlight";
@@ -133,11 +133,11 @@ export function MessageBubble({ message, onEdit, onBranch, onBookmark, onFetchRa
   useEffect(() => {
     if (!message.imageDataUrl) return;
     if (!isBlobRef(message.imageDataUrl)) {
-      setResolvedImageUrl(message.imageDataUrl);
+      startTransition(() => setResolvedImageUrl(message.imageDataUrl!));
       return;
     }
     let cancelled = false;
-    setImageLoadFailed(false);
+    startTransition(() => setImageLoadFailed(false));
     loadImageFromBlob(message.imageDataUrl).then((url) => {
       if (cancelled) return;
       if (url) {

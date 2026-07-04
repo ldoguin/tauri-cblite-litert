@@ -575,7 +575,7 @@ export default function App() {
     }, [voice.state, voice.workerStatus, voice.start]),
     onError: useCallback((msg: string) => setVoiceError(msg), []),
   });
-  wakeWordRef.current = wakeWord;
+  useEffect(() => { wakeWordRef.current = wakeWord; }, [wakeWord]);
 
   // Derive context window length in priority order:
   //   1. config.contextLength (user-set or auto-set when loading from catalogue)

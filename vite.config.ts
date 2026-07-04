@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import { viteStaticCopy } from "vite-plugin-static-copy";
 import * as path from "path";
 import * as fs from "fs";
+import { createRequire } from "module";
 
 const host = process.env.TAURI_DEV_HOST;
 
@@ -10,8 +11,25 @@ const host = process.env.TAURI_DEV_HOST;
 // This plugin serves all VAD + ORT static assets directly from node_modules
 // via a Connect middleware that runs before ANY Vite transform pipeline.
 // viteStaticCopy is kept only for production builds (copies files to dist/).
-const ORT_DIST = "node_modules/.pnpm/onnxruntime-web@1.26.0/node_modules/onnxruntime-web/dist";
-const VAD_DIST = "node_modules/@ricky0123/vad-web/dist";
+
+// Resolve package roots portably across npm / yarn / pnpm without hardcoding
+// version numbers or pnpm's content-addressable layout.
+const _require = createRequire(import.meta.url);
+function pkgDir(packageJsonPath: string): string {
+  return path.dirname(_require.resolve(packageJsonPath));
+}
+const VAD_DIST = path.join(pkgDir("@ricky0123/vad-web/package.json"), "dist");
+// onnxruntime-web is a direct dep of vad-web; resolve it relative to vad-web
+// so we always get the version vad-web actually depends on, not a hoisted one.
+const VAD_PKG_DIR = pkgDir("@ricky0123/vad-web/package.json");
+const ORT_DIST = path.join(
+  path.dirname(
+    _require.resolve("onnxruntime-web/package.json", {
+      paths: [VAD_PKG_DIR],
+    })
+  ),
+  "dist"
+);
 
 const STATIC_MAP: Record<string, { file: string; mime: string }> = {};
 // ORT WASM binaries and MJS workers

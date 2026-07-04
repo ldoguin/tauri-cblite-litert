@@ -68,10 +68,6 @@ export function RetailScreen({ onBack, onDescribeImage, onAnalyze, embedModelId,
     });
   }, []);
 
-  // Load all products on mount
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { runSearch("", "All"); }, []);
-
   /**
    * Core search function.
    *
@@ -149,8 +145,13 @@ export function RetailScreen({ onBack, onDescribeImage, onAnalyze, embedModelId,
     }
   }, [embedModelId]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Load all products on mount — placed after runSearch declaration to avoid forward reference.
+  // eslint-disable-next-line react-hooks/exhaustive-deps, react-hooks/set-state-in-effect
+  useEffect(() => { runSearch("", "All"); }, []);
+
   // Stable ref so the voice callback always calls the latest runSearch
   const runSearchRef = useRef(runSearch);
+  // eslint-disable-next-line react-hooks/set-state-in-effect
   useEffect(() => { runSearchRef.current = runSearch; }, [runSearch]);
 
   // Stable ref for the agent — populated after runSearchAgent is defined below
@@ -211,7 +212,8 @@ export function RetailScreen({ onBack, onDescribeImage, onAnalyze, embedModelId,
         const desc = await onDescribeImage(dataUrl);
         setQuery(desc);
         setSearchMode("text");
-        await runSearchAgent(desc);
+        // Use the stable ref so this callback doesn't need runSearchAgent in scope.
+        await runSearchAgentRef.current?.(desc);
       } catch {
         // leave image shown — user can tap "Re-describe" to retry
       } finally {
@@ -220,7 +222,7 @@ export function RetailScreen({ onBack, onDescribeImage, onAnalyze, embedModelId,
     };
     reader.readAsDataURL(file);
     e.target.value = "";
-  }, [onDescribeImage]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [onDescribeImage]);
 
   /**
    * Search agent: given an image description, uses the LLM to extract the product

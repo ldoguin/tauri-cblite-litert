@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, type RefObject } from "react";
+import { startTransition, useEffect, useRef, useState, useCallback, type RefObject } from "react";
 import { ContextWindowBar } from "./ContextWindowBar";
 import { MessageBubble, StreamingBubble, ThinkingBubble } from "./MessageBubble";
 import type { UseVoiceInputReturn } from "../hooks/useVoiceInput";
@@ -107,8 +107,10 @@ export function ChatPane({
   // Sync voice result into local input
   useEffect(() => {
     if (voiceInput) {
-      setInput((prev) => (prev ? `${prev} ${voiceInput}` : voiceInput));
-      onVoiceInputChange("");
+      startTransition(() => {
+        setInput((prev) => (prev ? `${prev} ${voiceInput}` : voiceInput));
+        onVoiceInputChange("");
+      });
       textareaRef.current?.focus();
     }
   }, [voiceInput, onVoiceInputChange]);
@@ -143,15 +145,17 @@ export function ChatPane({
     if (isThinking) {
       if (thinkingStartRef.current === null) {
         thinkingStartRef.current = Date.now();
-        setThinkingElapsedMs(0);
+        startTransition(() => setThinkingElapsedMs(0));
       }
       const id = setInterval(() => {
-        setThinkingElapsedMs(Date.now() - (thinkingStartRef.current ?? Date.now()));
+        startTransition(() =>
+          setThinkingElapsedMs(Date.now() - (thinkingStartRef.current ?? Date.now()))
+        );
       }, 500);
       return () => clearInterval(id);
     } else {
       thinkingStartRef.current = null;
-      setThinkingElapsedMs(0);
+      startTransition(() => setThinkingElapsedMs(0));
     }
   }, [isGenerating, streamingContent]);
 

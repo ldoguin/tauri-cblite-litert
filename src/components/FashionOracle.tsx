@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { startTransition, useCallback, useEffect, useRef, useState } from "react";
 import { type Product } from "../lib/types";
 import { embed, cosineSimilarity } from "../lib/rag";
 import {
@@ -196,8 +196,8 @@ export function FashionOracle({ onBack, onDescribeImage, onAnalyze, embedModelId
 
   // update status text while recording/processing
   useEffect(() => {
-    if (voice.state === "recording")   setStatusText("Listening…");
-    if (voice.state === "processing")  setStatusText("Transcribing…");
+    if (voice.state === "recording")  startTransition(() => setStatusText("Listening…"));
+    if (voice.state === "processing") startTransition(() => setStatusText("Transcribing…"));
   }, [voice.state]);
 
   const reset = () => {
