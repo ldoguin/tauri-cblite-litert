@@ -68,6 +68,7 @@ plantkb/build/
 .cargo/config.toml
 
 # Scratch / local artifacts (not for git)
+*.AppImage
 *.mkv
 *.profraw
 screen.jpg
