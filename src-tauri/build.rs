@@ -1,9 +1,50 @@
 fn main() {
     tauri_build::build();
 
-    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        linux_fixups();
+    match std::env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("linux")   => linux_fixups(),
+        Ok("macos")   => macos_fixups(),
+        Ok("windows") => windows_fixups(),
+        _ => {}
     }
+}
+
+// ── macOS runtime library fixups ─────────────────────────────────────────────
+//
+// litert-lm-sys and litert-sys each emit `cargo:lib_dir=<cache>` which Cargo
+// exposes as DEP_LITERTLM_LIB_DIR / DEP_LITERT_LIB_DIR to direct dependents.
+// Those dependents (litertlm, litert) forward the rpath via their own build.rs,
+// but `rustc-link-arg` is NOT propagated transitively to the final binary.
+// We must re-emit it here so the macOS dynamic linker can find the dylibs.
+fn macos_fixups() {
+    // libLiteRtLmC.dylib cache (from litert-lm-sys)
+    println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LIB_DIR");
+    if let Ok(dir) = std::env::var("DEP_LITERTLM_LIB_DIR") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+    }
+
+    // libLiteRt.dylib + accelerator dylibs cache (from litert-sys)
+    println!("cargo:rerun-if-env-changed=DEP_LITERT_LIB_DIR");
+    if let Ok(dir) = std::env::var("DEP_LITERT_LIB_DIR") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+    }
+
+    // libcblite.dylib (from tauri-plugin-cblite / couchbase-lite-rust)
+    println!("cargo:rerun-if-env-changed=DEP_CBLITE_LIB_DIR");
+    if let Ok(dir) = std::env::var("DEP_CBLITE_LIB_DIR") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+    }
+}
+
+// ── Windows runtime library fixups ───────────────────────────────────────────
+//
+// On Windows the dynamic linker uses PATH, not rpath. The build scripts copy
+// the DLLs next to the binary via rustc-link-search, which is sufficient for
+// `cargo run`. For `tauri build` the bundler copies them via tauri.conf.json
+// `externalBin` / `resources`. No rpath emission needed.
+fn windows_fixups() {
+    println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=DEP_LITERT_LIB_DIR");
 }
 
 // ── Linux runtime library fixups ─────────────────────────────────────────────
