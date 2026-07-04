@@ -11,27 +11,31 @@ fn main() {
 
 // ── macOS runtime library fixups ─────────────────────────────────────────────
 //
-// litert-lm-sys and litert-sys each emit `cargo:lib_dir=<cache>` which Cargo
-// exposes as DEP_LITERTLM_LIB_DIR / DEP_LITERT_LIB_DIR to direct dependents.
-// Those dependents (litertlm, litert) forward the rpath via their own build.rs,
-// but `rustc-link-arg` is NOT propagated transitively to the final binary.
-// We must re-emit it here so the macOS dynamic linker can find the dylibs.
+// `rustc-link-arg` emitted by a build script is NOT propagated transitively
+// to the final binary — only the crate that emits it gets the flag.
+// We must re-emit every rpath here so dyld can find the dylibs at runtime.
+//
+// DEP_ variable naming rules:
+//   - sys crates with `links = "Foo"` → DEP_FOO_<KEY>
+//   - non-sys crates (no `links`)     → DEP_<PACKAGE_NAME_UPPER>_<KEY>
+//     (hyphens in package name → underscores)
+//
+// litert-lm-sys  links="LiteRtLm"  → DEP_LITERTLM_LIB_DIR  (libLiteRtLmC dir)
+// litert-sys     links="LiteRt"    → DEP_LITERT_LIB_DIR     (libLiteRt dir)
+//
+// litertlm (no links) re-exports both as:
+//   cargo:lib_dir        → DEP_LITERTLM_LIB_DIR      (LM dylib dir)
+//   cargo:litert_lib_dir → DEP_LITERTLM_LITERT_LIB_DIR (base LiteRt dir)
 fn macos_fixups() {
-    // libLiteRtLmC.dylib cache (from litert-lm-sys)
+    // libLiteRtLmC.dylib — re-exported by litertlm's build.rs as cargo:lib_dir
     println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LIB_DIR");
     if let Ok(dir) = std::env::var("DEP_LITERTLM_LIB_DIR") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
     }
 
-    // libLiteRt.dylib + accelerator dylibs cache (from litert-sys)
-    println!("cargo:rerun-if-env-changed=DEP_LITERT_LIB_DIR");
-    if let Ok(dir) = std::env::var("DEP_LITERT_LIB_DIR") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
-    }
-
-    // libcblite.dylib (from tauri-plugin-cblite / couchbase-lite-rust)
-    println!("cargo:rerun-if-env-changed=DEP_CBLITE_LIB_DIR");
-    if let Ok(dir) = std::env::var("DEP_CBLITE_LIB_DIR") {
+    // libLiteRt.dylib + accelerators — re-exported by litertlm as cargo:litert_lib_dir
+    println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LITERT_LIB_DIR");
+    if let Ok(dir) = std::env::var("DEP_LITERTLM_LITERT_LIB_DIR") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
     }
 }
@@ -44,7 +48,7 @@ fn macos_fixups() {
 // `externalBin` / `resources`. No rpath emission needed.
 fn windows_fixups() {
     println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LIB_DIR");
-    println!("cargo:rerun-if-env-changed=DEP_LITERT_LIB_DIR");
+    println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LITERT_LIB_DIR");
 }
 
 // ── Linux runtime library fixups ─────────────────────────────────────────────
