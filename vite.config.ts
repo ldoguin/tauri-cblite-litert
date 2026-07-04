@@ -14,22 +14,33 @@ const host = process.env.TAURI_DEV_HOST;
 
 // Resolve package roots portably across npm / yarn / pnpm without hardcoding
 // version numbers or pnpm's content-addressable layout.
+//
+// We cannot use `require.resolve("pkg/package.json")` because some packages
+// (e.g. onnxruntime-web@1.26) do not list "./package.json" in their exports
+// map and Node will throw ERR_PACKAGE_PATH_NOT_EXPORTED.
+// Instead we resolve a known exported entry point and walk up the directory
+// tree until we find the package.json boundary.
 const _require = createRequire(import.meta.url);
-function pkgDir(packageJsonPath: string): string {
-  return path.dirname(_require.resolve(packageJsonPath));
+
+function findPkgDir(resolvedFile: string): string {
+  let dir = path.dirname(resolvedFile);
+  while (dir !== path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, "package.json"))) return dir;
+    dir = path.dirname(dir);
+  }
+  throw new Error(`Could not find package.json above ${resolvedFile}`);
 }
-const VAD_DIST = path.join(pkgDir("@ricky0123/vad-web/package.json"), "dist");
+
+// vad-web ships a CJS main entry that is always resolvable.
+const VAD_PKG_DIR = findPkgDir(_require.resolve("@ricky0123/vad-web"));
+const VAD_DIST = path.join(VAD_PKG_DIR, "dist");
+
 // onnxruntime-web is a direct dep of vad-web; resolve it relative to vad-web
 // so we always get the version vad-web actually depends on, not a hoisted one.
-const VAD_PKG_DIR = pkgDir("@ricky0123/vad-web/package.json");
-const ORT_DIST = path.join(
-  path.dirname(
-    _require.resolve("onnxruntime-web/package.json", {
-      paths: [VAD_PKG_DIR],
-    })
-  ),
-  "dist"
+const ORT_PKG_DIR = findPkgDir(
+  _require.resolve("onnxruntime-web", { paths: [VAD_PKG_DIR] })
 );
+const ORT_DIST = path.join(ORT_PKG_DIR, "dist");
 
 const STATIC_MAP: Record<string, { file: string; mime: string }> = {};
 // ORT WASM binaries and MJS workers
