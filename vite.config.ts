@@ -42,6 +42,10 @@ const ORT_PKG_DIR = findPkgDir(
 );
 const ORT_DIST = path.join(ORT_PKG_DIR, "dist");
 
+// @litert-lm/core ships WASM files in its wasm/ subdirectory.
+const LITERT_LM_PKG_DIR = findPkgDir(_require.resolve("@litert-lm/core"));
+const LITERT_LM_WASM_DIR = path.join(LITERT_LM_PKG_DIR, "wasm");
+
 const STATIC_MAP: Record<string, { file: string; mime: string }> = {};
 // ORT WASM binaries and MJS workers
 for (const f of fs.readdirSync(ORT_DIST)) {
@@ -53,6 +57,13 @@ for (const f of fs.readdirSync(ORT_DIST)) {
 for (const f of ["vad.worklet.bundle.min.js", "silero_vad_v5.onnx", "silero_vad_legacy.onnx"]) {
   const mime = f.endsWith(".js") ? "application/javascript; charset=utf-8" : "application/octet-stream";
   STATIC_MAP[`/${f}`] = { file: path.resolve(VAD_DIST, f), mime };
+}
+// LiteRT-LM WASM runtime files — served under /litert-lm/
+for (const f of fs.readdirSync(LITERT_LM_WASM_DIR)) {
+  if (f.endsWith(".wasm") || f.endsWith(".js")) {
+    const mime = f.endsWith(".wasm") ? "application/wasm" : "application/javascript; charset=utf-8";
+    STATIC_MAP[`/litert-lm/${f}`] = { file: path.resolve(LITERT_LM_WASM_DIR, f), mime };
+  }
 }
 
 function staticAssetsPlugin() {
@@ -87,6 +98,8 @@ export default defineConfig(async () => ({
         { src: path.resolve(VAD_DIST, "silero_vad_legacy.onnx"), dest: "./", rename: { stripBase: true } },
         { src: path.resolve(ORT_DIST, "*.wasm"), dest: "./", rename: { stripBase: true } },
         { src: path.resolve(ORT_DIST, "*.mjs"), dest: "./", rename: { stripBase: true } },
+        { src: path.resolve(LITERT_LM_WASM_DIR, "*.wasm"), dest: "./litert-lm/", rename: { stripBase: true } },
+        { src: path.resolve(LITERT_LM_WASM_DIR, "*.js"), dest: "./litert-lm/", rename: { stripBase: true } },
       ],
     }),
   ],
@@ -113,6 +126,11 @@ export default defineConfig(async () => ({
       // Tell vite to ignore watching `src-tauri`
       ignored: ["**/src-tauri/**"],
     },
+  },
+  // Bundle Web Workers as classic IIFE so @litertjs/wasm-utils can call
+  // importScripts() to load the WASM glue script at runtime.
+  worker: {
+    format: "iife",
   },
   // Env variables starting with the item of `envPrefix` will be exposed in tauri's source code through `import.meta.env`.
   envPrefix: ["VITE_", "TAURI_ENV_*"],

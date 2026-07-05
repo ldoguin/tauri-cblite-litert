@@ -47,7 +47,10 @@ export async function getAppPlatform(): Promise<AppPlatform> {
   if (!isTauri()) { _platform = "web"; return _platform; }
   try {
     const { platform } = await import("@tauri-apps/plugin-os");
-    _platform = (await platform()) === "android" ? "android" : "desktop";
+    const p = await platform();
+    if (p === "android") _platform = "android";
+    else if (p === "windows") _platform = "windows";
+    else _platform = "desktop";
   } catch {
     _platform = "desktop";
   }
@@ -56,7 +59,7 @@ export async function getAppPlatform(): Promise<AppPlatform> {
 
 // ── Backend types ──────────────────────────────────────────────────────────
 
-export type LlmBackend = "tauri" | "mediapipe" | "api" | "mock";
+export type LlmBackend = "tauri" | "mediapipe" | "wasm" | "api" | "mock";
 
 export interface ApiConfig {
   baseUrl: string;
@@ -83,10 +86,12 @@ export function isWebLlmLoading(): boolean { return webLlmLoading; }
 
 export { isTauri } from "./db";
 import { isTauri } from "./db";
+import { generateViaWasm, isWasmModelLoaded, loadWasmModel, unloadWasmModel } from "./llm-wasm";
 
 export function getActiveBackend(): LlmBackend {
   if (isTauri() && activeLmModelId) return "tauri";
   if (webLlm) return "mediapipe";
+  if (isWasmModelLoaded()) return "wasm";
   if (apiConfig) return "api";
   return "mock";
 }
@@ -106,6 +111,33 @@ export async function loadModels(
   if (_loadModelsPromise) { await _loadModelsPromise; return; }
   const run = async () => {
     const platform = await getAppPlatform();
+
+    // On Windows, LiteRtLmC.dll is not available — use the WASM engine instead.
+    if (platform === "windows" && config.lmModelPath) {
+      try {
+        const { convertFileSrc } = await import("@tauri-apps/api/core");
+        const modelUrl = convertFileSrc(config.lmModelPath);
+        const caps = resolveModelCapabilities(config.lmModelPath, platform, scanned);
+        await loadWasmModel(modelUrl, caps.contextLength || 2048);
+        setActiveLmModel(LM_MODEL_ID);
+        setActiveContextLength(caps.contextLength || 4096);
+      } catch (err) {
+        console.error("[llm] WASM model load failed:", err);
+      }
+      // Embedding model still loads natively on Windows (litert-sys ships libLiteRt.dll)
+      if (config.embeddingModelPath) {
+        try {
+          await loadModel({
+            modelId: EMBED_MODEL_ID,
+            modelPath: config.embeddingModelPath,
+            accelerator: "cpu",
+          });
+        } catch (err) {
+          console.warn("[llm] Embedding model load failed on Windows:", err);
+        }
+      }
+      return;
+    }
 
     if (config.lmModelPath) {
       const caps = resolveModelCapabilities(config.lmModelPath, platform, scanned);
@@ -168,6 +200,7 @@ export async function loadModels(
 export async function unloadModels(): Promise<void> {
   try { await unloadModel(EMBED_MODEL_ID); } catch { /* not loaded */ }
   try { await unloadLmModel(LM_MODEL_ID); } catch { /* not loaded */ }
+  unloadWasmModel();
   setActiveLmModel(null);
 }
 
@@ -205,6 +238,21 @@ export async function loadLmFromPath(
   });
   setActiveLmModel(LM_MODEL_ID);
   setActiveContextLength(caps.contextLength || 4096);
+}
+
+/**
+ * Load a .litertlm model from a URL into the WASM engine.
+ * Works on web and Tauri (no native plugin required).
+ * Pass onProgress to show a loading bar (0–100).
+ */
+export async function loadWasmFromUrl(
+  modelUrl: string,
+  maxTokens = 4096,
+  onProgress?: (pct: number) => void,
+): Promise<void> {
+  await loadWasmModel(modelUrl, maxTokens, onProgress);
+  setActiveLmModel(LM_MODEL_ID);
+  setActiveContextLength(maxTokens);
 }
 
 /** Scan a folder for .litertlm files. Returns [{name, path}] sorted by name. */
@@ -252,7 +300,7 @@ export async function loadWebLlm(opts: WebLlmOptions): Promise<void> {
         modelAssetPath: opts.modelUrl,
         delegate: gpuAvailable ? "GPU" : "CPU",
       },
-      maxTokens: opts.maxTokens ?? 1024,
+      maxTokens: opts.maxTokens ?? 4096,
       topK: opts.topK ?? 40,
       temperature: opts.temperature ?? 0.8,
     });
@@ -517,6 +565,7 @@ function dispatchGenerate(
 ): Promise<void> {
   if (backend === "tauri") return generateViaTauri(messages, opts, callbacks);
   if (backend === "mediapipe") return generateViaMediaPipe(messages, opts, callbacks);
+  if (backend === "wasm") return generateViaWasm(messages, opts, callbacks);
   if (backend === "api") return generateViaApi(messages, opts, callbacks);
   return generateMock(messages, opts, callbacks);
 }

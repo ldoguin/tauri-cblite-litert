@@ -83,6 +83,20 @@ export function SettingsPanel({ config, onSave, onClose, embedded }: Props) {
             )}
 
             <label className="field-label">
+              WASM LLM model URL <span className="field-optional">(web / Windows fallback)</span>
+            </label>
+            <input
+              className="field-input"
+              placeholder="https://huggingface.co/…/model.litertlm"
+              value={draft.wasmModelUrl}
+              onChange={(e) => set("wasmModelUrl", e.target.value)}
+            />
+            <p className="hint">
+              URL of a .litertlm model loaded via WebAssembly in the browser.
+              Loaded automatically on startup when set. No GPU required.
+            </p>
+
+            <label className="field-label">
               Embedding model path (.tflite)
             </label>
             <input

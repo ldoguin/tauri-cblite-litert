@@ -45,7 +45,7 @@ interface Props {
   activeLlmId?: string;
   /** Currently active embed model id (from useChat) */
   activeEmbedId?: string;
-  onLoadLlm: (url: string, modelId: string) => Promise<void>;
+  onLoadLlm: (url: string, modelId: string, onProgress?: (pct: number) => void) => Promise<void>;
   onLoadEmbed: (url: string, modelId: string) => Promise<void>;
   onClose: () => void;
 }
@@ -68,6 +68,8 @@ export function ModelManagerPanel({
   const [models, setModels] = useState<CachedModel[]>(() => getCachedModels());
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
+  // Progress (0–100) for WASM model loads (fetch + engine init in worker)
+  const [wasmProgress, setWasmProgress] = useState<Record<string, number>>({});
   const [error, setError] = useState<string | null>(null);
   const [memInfo, setMemInfo] = useState<MemInfo | null>(null);
 
@@ -143,13 +145,11 @@ export function ModelManagerPanel({
 
   const handleLoad = useCallback(async (model: CachedModel) => {
     setLoadingId(model.id);
+    setWasmProgress((p) => ({ ...p, [model.id]: 0 }));
     setError(null);
     try {
       if (model.kind === "llm") {
         let urlOrPath = model.url;
-        // "web" entries load directly from their URL; "tauri" (desktop) and
-        // "android" entries are downloaded locally first and must resolve
-        // to the on-disk path before loading.
         if (isTauri() && model.platform !== "web") {
           const { invoke } = await import("@tauri-apps/api/core");
           const fileName = model.fileName ?? model.url.split("/").pop() ?? `${model.id}.bin`;
@@ -157,14 +157,19 @@ export function ModelManagerPanel({
           if (!localPath) throw new Error("Model not found on disk — try downloading again");
           urlOrPath = localPath;
         }
-        await onLoadLlm(urlOrPath, model.id);
+        await onLoadLlm(urlOrPath, model.id, (pct) => {
+          if (isMountedRef.current) setWasmProgress((p) => ({ ...p, [model.id]: pct }));
+        });
       } else if (model.kind === "embed") {
         await onLoadEmbed(model.url, model.id);
       }
     } catch (err) {
       if (isMountedRef.current) setError(String(err));
     } finally {
-      if (isMountedRef.current) setLoadingId(null);
+      if (isMountedRef.current) {
+        setLoadingId(null);
+        setWasmProgress((p) => { const n = { ...p }; delete n[model.id]; return n; });
+      }
     }
   }, [onLoadLlm, onLoadEmbed]);
 
@@ -198,6 +203,9 @@ export function ModelManagerPanel({
                 {byKind(kind).map((model) => {
                   const dl = progress[model.id];
                   const downloading = !!dl || isDownloading(model.id);
+                  const wasmPct = wasmProgress[model.id];
+                  const isWasmLoading = loadingId === model.id && wasmPct !== undefined;
+                  const isWebModel = model.platform === "web";
                   const isActiveLlm = kind === "llm" && activeLlmId === model.id;
                   const isActiveEmbed = kind === "embed" && activeEmbedId === model.id;
                   const isActive = isActiveLlm || isActiveEmbed;
@@ -242,6 +250,26 @@ export function ModelManagerPanel({
                           </span>
                         </div>
                       )}
+                      {/* WASM load progress bar */}
+                      {isWasmLoading && (
+                        <div className="model-progress-wrap">
+                          <div className="model-progress-bar">
+                            <div
+                              className="model-progress-fill"
+                              style={{ width: `${wasmPct}%` }}
+                            />
+                          </div>
+                          <span className="model-progress-label">
+                            {wasmPct < 92
+                              ? `Downloading… ${wasmPct}%`
+                              : wasmPct < 96
+                              ? "Initializing engine…"
+                              : wasmPct < 100
+                              ? "Warming up GPU (first run may take a minute)…"
+                              : "Ready"}
+                          </span>
+                        </div>
+                      )}
 
                       <div className="model-card-actions">
                         {kind === "llm" && (
@@ -254,7 +282,7 @@ export function ModelManagerPanel({
                           >
                             Cancel
                           </button>
-                        ) : model.cached ? (
+                        ) : model.cached || isWebModel ? (
                           <>
                             {(kind === "llm" || kind === "embed") && (
                               <button
@@ -269,13 +297,15 @@ export function ModelManagerPanel({
                                   : "Load"}
                               </button>
                             )}
-                            <button
-                              className="btn-sm danger"
-                              onClick={() => handleDelete(model.id)}
-                              title="Remove from cache"
-                            >
-                              Delete
-                            </button>
+                            {model.cached && (
+                              <button
+                                className="btn-sm danger"
+                                onClick={() => handleDelete(model.id)}
+                                title="Remove from cache"
+                              >
+                                Delete
+                              </button>
+                            )}
                           </>
                         ) : (
                           <button

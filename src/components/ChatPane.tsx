@@ -122,7 +122,7 @@ export function ChatPane({
 
   const handleSend = () => {
     const text = input.trim();
-    if ((!text && !attachedImage) || status === "generating" || status === "embedding") return;
+    if ((!text && !attachedImage) || status === "generating" || status === "embedding" || status === "loading-models") return;
     setInput("");
     const img = attachedImage ?? undefined;
     setAttachedImage(null);
@@ -136,7 +136,7 @@ export function ChatPane({
     }
   };
 
-  const isGenerating = status === "generating" || status === "embedding";
+  const isGenerating = status === "generating" || status === "embedding" || status === "loading-models";
   const isEmpty = messages.length === 0 && streamingContent === null;
 
   // Tick elapsed time while waiting for the first token ("thinking" state)
@@ -251,6 +251,8 @@ export function ChatPane({
             placeholder={
               voice.state === "recording"
                 ? "Listening…"
+                : status === "loading-models"
+                ? "Loading model… please wait"
                 : isGenerating
                 ? "Generating…"
                 : "Ask a question… (Enter to send, paste/drop image)"

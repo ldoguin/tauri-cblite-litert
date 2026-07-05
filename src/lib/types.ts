@@ -396,6 +396,12 @@ export interface ModelConfig {
   searxngUrl: string;
   /** Folder path scanned for .litertlm model files */
   modelFolder: string;
+  /**
+   * URL of a .litertlm model to load via the WASM engine in the browser.
+   * Used on web (and Windows as fallback). Example:
+   * https://huggingface.co/…/resolve/main/model.litertlm
+   */
+  wasmModelUrl: string;
 }
 
 export const DEFAULT_MODEL_CONFIG: ModelConfig = {
@@ -420,6 +426,7 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   hybridBm25Weight: 0.3,
   searxngUrl: "",
   modelFolder: "",
+  wasmModelUrl: "",
 };
 
 export interface Product {

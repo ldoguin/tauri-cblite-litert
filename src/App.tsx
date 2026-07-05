@@ -35,7 +35,7 @@ import type { LlmBackend, ApiConfig, WebLlmOptions, ModelPreset } from "./lib/ll
 import "./App.css";
 
 type Modal = "models" | "search" | null;
-type ToolbarPanel = "none" | "presets" | "llm" | "api" | "embed";
+type ToolbarPanel = "none" | "presets" | "llm" | "wasm" | "api" | "embed";
 type AppMode = "welcome" | "chat" | "retail" | "oracle" | "fitness" | "studio" | "accessibility" | "tasks" | "inspection" | "clinical" | "settings" | "photos" | "annotate" | "crop-disease";
 
 // ── Backend status badges ──────────────────────────────────────────────────
@@ -51,12 +51,14 @@ function LlmBadge({ backend }: { backend: LlmBackend }) {
   const labels: Record<LlmBackend, string> = {
     tauri:     "LLM: LiteRT-LM",
     mediapipe: "LLM: on-device",
+    wasm:      "LLM: WASM",
     api:       "LLM: API",
     mock:      "LLM: mock",
   };
   const cls: Record<LlmBackend, string> = {
     tauri:     "badge-litert",
     mediapipe: "badge-litert",
+    wasm:      "badge-litert",
     api:       "badge-use",
     mock:      "badge-bow",
   };
@@ -71,7 +73,7 @@ function Toolbar({
   theme, onToggleTheme,
   wakeWordState, onToggleWakeWord,
   ttsEnabled, ttsState, ttsErrorMsg, onToggleTts,
-  onLoadPreset, onLoadWebLlm, onUnloadWebLlm, onConfigureApi, onInitEmbedModel,
+  onLoadPreset, onLoadWebLlm, onUnloadWebLlm, onLoadWasmLlm, onConfigureApi, onInitEmbedModel,
   onShowModels, onNavBack, navBackLabel,
 }: {
   embeddingStatus: EmbeddingStatus | null;
@@ -90,6 +92,7 @@ function Toolbar({
   onLoadPreset: (preset: ModelPreset) => void;
   onLoadWebLlm: (opts: WebLlmOptions) => void;
   onUnloadWebLlm: () => void;
+  onLoadWasmLlm: (url: string) => void;
   onConfigureApi: (cfg: ApiConfig) => void;
   onInitEmbedModel: (url: string) => void;
   onShowModels: () => void;
@@ -99,6 +102,8 @@ function Toolbar({
   const [panel, setPanel] = useState<ToolbarPanel>("none");
   const [llmUrl, setLlmUrl]         = useState("");
   const [llmLoading, setLlmLoading] = useState(false);
+  const [wasmUrl, setWasmUrl]       = useState("");
+  const [wasmLoading, setWasmLoading] = useState(false);
   const [apiUrl, setApiUrl]         = useState("https://api.groq.com/openai/v1");
   const [apiKey, setApiKey]         = useState("");
   const [apiModel, setApiModel]     = useState("llama-3.1-8b-instant");
@@ -129,6 +134,15 @@ function Toolbar({
     try { await onLoadWebLlm({ modelUrl: llmUrl.trim() }); setPanel("none"); }
     catch (e) { setToolbarError("Failed to load LLM: " + String(e)); }
     finally { setLlmLoading(false); }
+  };
+
+  const handleLoadWasm = async () => {
+    if (!wasmUrl.trim()) return;
+    setWasmLoading(true);
+    setToolbarError(null);
+    try { await onLoadWasmLlm(wasmUrl.trim()); setPanel("none"); }
+    catch (e) { setToolbarError("Failed to load WASM model: " + String(e)); }
+    finally { setWasmLoading(false); }
   };
 
   const handleLoadPreset = async (preset: ModelPreset) => {
@@ -246,7 +260,7 @@ function Toolbar({
           </div>
         )}
 
-        {/* ── Custom LLM panel ── */}
+        {/* ── Custom LLM panel (MediaPipe .task) ── */}
         {panel === "llm" && (
           <div className="toolbar-panel-row">
             <input className="toolbar-input" style={{ width: 340 }}
@@ -256,6 +270,25 @@ function Toolbar({
               {llmLoading ? "Loading…" : "Load"}
             </button>
             <button className="btn-sm secondary" onClick={() => setPanel("none")}>✕</button>
+          </div>
+        )}
+
+        {/* ── WASM LLM panel (.litertlm via @litert-lm/core) ── */}
+        {panel === "wasm" && (
+          <div className="toolbar-panel-col">
+            <div className="toolbar-panel-row">
+              <input className="toolbar-input" style={{ width: 380 }}
+                placeholder="https://…/model.litertlm"
+                value={wasmUrl} onChange={(e) => setWasmUrl(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleLoadWasm()} />
+              <button className="btn-sm" onClick={handleLoadWasm} disabled={wasmLoading}>
+                {wasmLoading ? "Loading…" : "Load"}
+              </button>
+              <button className="btn-sm secondary" onClick={() => setPanel("none")}>✕</button>
+            </div>
+            <div className="toolbar-hint" style={{ padding: "2px 4px" }}>
+              Runs entirely in-browser via WebAssembly — no GPU required. Supports .litertlm models.
+            </div>
           </div>
         )}
 
@@ -346,6 +379,14 @@ function Toolbar({
               isWebLlmLoaded
                 ? <button className="btn-sm danger" onClick={onUnloadWebLlm}>Unload LLM</button>
                 : <button className="btn-sm secondary" onClick={() => setPanel("llm")}>Load LLM</button>
+            )}
+            {!isTauri() && llmBackend !== "wasm" && (
+              <button className="btn-sm secondary" onClick={() => setPanel("wasm")} title="Load a .litertlm model via WebAssembly">
+                WASM LLM
+              </button>
+            )}
+            {!isTauri() && llmBackend === "wasm" && (
+              <span className="badge badge-litert">WASM loaded</span>
             )}
             {!isTauri() && (
               <button className="btn-sm secondary" onClick={() => setPanel("api")} title="Cloud LLM fallback for browsers without WebGPU">Cloud LLM fallback</button>
@@ -887,6 +928,7 @@ export default function App() {
           onLoadPreset={chat.loadPreset}
           onLoadWebLlm={chat.loadWebLlmModel}
           onUnloadWebLlm={chat.unloadWebLlmModel}
+          onLoadWasmLlm={chat.loadWasmLlmFromUrl}
           onConfigureApi={chat.configureApi}
           onInitEmbedModel={chat.initEmbeddingEngine}
           onShowModels={() => setModal("models")}

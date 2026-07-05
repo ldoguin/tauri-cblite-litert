@@ -34,7 +34,7 @@ async function ensurePlatform(): Promise<AppPlatform> {
 export type ModelKind = "llm" | "embed" | "whisper";
 
 /** Runtime platform identifier used for per-platform overrides. */
-export type AppPlatform = "web" | "android" | "desktop";
+export type AppPlatform = "web" | "android" | "windows" | "desktop";
 
 /**
  * Capabilities and loading parameters for a specific model.
@@ -241,14 +241,38 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     capabilities: { supportsVision: true, contextLength: 2048, promptTemplate: "chatml", requiredAccelerator: "gpu" },
   },
   // ── LLMs (web) ──
+  // ── LLMs (web — WASM engine via @litert-lm/core) ──
+  // @litert-lm/core currently only supports the Gemma 4 -web.litertlm files.
+  // These are stripped variants without vision/audio/embedder sub-models that
+  // the browser WASM runtime cannot stream-load. No GPU required.
+  {
+    id: "gemma4-2b-wasm",
+    label: "Gemma 4 2B (browser WASM)",
+    description: "Gemma 4 E2B — ~2.5 GB, runs in-browser via WebAssembly, no GPU needed",
+    kind: "llm",
+    platform: "web",
+    url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm",
+    sizeBytes: 2500 * 1024 * 1024,
+    capabilities: { contextLength: 8192, promptTemplate: "gemma" },
+  },
+  {
+    id: "gemma4-4b-wasm",
+    label: "Gemma 4 4B (browser WASM)",
+    description: "Gemma 4 E4B — ~4.5 GB, higher quality, runs in-browser via WebAssembly, no GPU needed",
+    kind: "llm",
+    platform: "web",
+    url: "https://huggingface.co/litert-community/gemma-4-E4B-it-litert-lm/resolve/main/gemma-4-E4B-it-web.litertlm",
+    sizeBytes: 4500 * 1024 * 1024,
+    capabilities: { contextLength: 8192, promptTemplate: "gemma" },
+  },
   // gemma3-1b-web removed 2026-06-30: same upstream Gemma3 gating as the
   // desktop/Android entries (see qwen3-1.7b-desktop above). No ungated
   // Qwen3 .task (MediaPipe web) export exists yet, so there's currently no
   // small/fast tier for web — gemma4-2b-web is the only web LLM option.
   {
     id: "gemma4-2b-web",
-    label: "Gemma 4 2B (web)",
-    description: "Gemma 4 E2B INT4 — ~1.5 GB, best quality on WebGPU",
+    label: "Gemma 4 2B (web WebGPU)",
+    description: "Gemma 4 E2B INT4 — ~1.5 GB, best quality on WebGPU (requires GPU)",
     kind: "llm",
     platform: "web",
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.task",

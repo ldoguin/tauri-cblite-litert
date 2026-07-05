@@ -60,6 +60,7 @@ import {
   stripThinking,
   loadWebLlm,
   unloadWebLlm,
+  loadWasmFromUrl,
   getActiveBackend,
   persistApiConfig,
   loadPersistedApiConfig,
@@ -268,12 +269,26 @@ export function useChat() {
     loadPersistedApiConfig();
 
     // Initialise embedding engine
-    const embStatus = await initEmbeddings(
-      !isTauri() ? cfg.embeddingModelPath || undefined : undefined,
-    );
+    // On web, only pass embeddingModelPath if it's a real HTTP URL — local
+    // file paths (set from a Tauri session) would cause @litertjs/core to
+    // attempt a fetch and fail with "Streaming kTfLiteEmbedder not supported".
+    const webEmbedUrl = !isTauri() && cfg.embeddingModelPath?.startsWith("http")
+      ? cfg.embeddingModelPath
+      : undefined;
+    const embStatus = await initEmbeddings(webEmbedUrl);
     if (isCancelled()) return;
     setEmbeddingStatus(embStatus);
     setEmbeddingBackend(getEmbeddingBackend());
+
+    // On web: load the WASM LLM engine when a model URL is configured.
+    if (!isTauri() && cfg.wasmModelUrl) {
+      try {
+        await loadWasmFromUrl(cfg.wasmModelUrl, cfg.maxTokens || 2048);
+      } catch (err) {
+        console.warn("[useChat] WASM model load failed:", err);
+      }
+      if (isCancelled()) return;
+    }
 
     // Load LiteRT models on Tauri
     if (cfg.lmModelPath || cfg.embeddingModelPath) {
@@ -359,11 +374,15 @@ export function useChat() {
     } else {
       // Web: loadModels is a no-op. Re-initialise the embedding engine directly
       // when embeddingModelPath changes so the new model is actually loaded.
-      if (next.embeddingModelPath) {
+      // Only pass the URL if it's a real HTTP URL — local paths fail on web.
+      const webEmbedUrlForUpdate = next.embeddingModelPath?.startsWith("http")
+        ? next.embeddingModelPath
+        : undefined;
+      if (webEmbedUrlForUpdate) {
         setStatus("loading-models");
         setError(null);
         try {
-          const embStatus = await initEmbeddings(next.embeddingModelPath || undefined);
+          const embStatus = await initEmbeddings(webEmbedUrlForUpdate);
           if (!isMountedRef.current) return;
           setEmbeddingStatus(embStatus);
           setEmbeddingBackend(getEmbeddingBackend());
@@ -382,16 +401,21 @@ export function useChat() {
     setStatus("loading-models");
     setError(null);
     try {
-      // Load embedding model first (smaller, faster)
-      if (preset.embedUrl && !isTauri()) {
-        const embStatus = await initEmbeddings(preset.embedUrl);
+      // Load embedding model first (smaller, faster).
+      // On web, skip .tflite URLs — @litertjs/core doesn't support embedder
+      // models yet; initEmbeddings will fall through to USE/BoW automatically.
+      const webPresetEmbedUrl = !isTauri() && preset.embedUrl?.endsWith(".tflite")
+        ? undefined
+        : preset.embedUrl;
+      if (webPresetEmbedUrl && !isTauri()) {
+        const embStatus = await initEmbeddings(webPresetEmbedUrl);
         if (!isMountedRef.current) return;
         setEmbeddingStatus(embStatus);
         setEmbeddingBackend(getEmbeddingBackend());
       }
       // Load web LLM
       if (preset.llmUrl && !isTauri()) {
-        await loadWebLlm({ modelUrl: preset.llmUrl });
+        await loadWebLlm({ modelUrl: preset.llmUrl, maxTokens: configRef.current?.maxTokens || 4096 });
         if (!isMountedRef.current) return;
         setLlmBackend(getActiveBackend());
       }
@@ -420,6 +444,21 @@ export function useChat() {
     setLlmBackend(getActiveBackend());
   }, []);
 
+  /** Load a .litertlm model from a URL into the WASM engine (web + Windows). */
+  const loadWasmLlmFromUrl = useCallback(async (url: string) => {
+    if (!url) return;
+    setStatus("loading-models");
+    setError(null);
+    try {
+      await loadWasmFromUrl(url, configRef.current?.maxTokens || 2048);
+      if (!isMountedRef.current) return;
+      setLlmBackend(getActiveBackend());
+      setStatus("ready");
+    } catch (err) {
+      if (isMountedRef.current) { setError(String(err)); setStatus("error"); }
+    }
+  }, []);
+
   // ── API config ───────────────────────────────────────────────────────────
 
   const configureApi = useCallback((cfg: ApiConfig) => {
@@ -430,7 +469,9 @@ export function useChat() {
   // ── Embedding engine ─────────────────────────────────────────────────────
 
   const initEmbeddingEngine = useCallback(async (liteRtModelUrl?: string) => {
-    const embStatus = await initEmbeddings(liteRtModelUrl);
+    // On web, .tflite embedder models are not supported by @litertjs/core yet.
+    const url = !isTauri() && liteRtModelUrl?.endsWith(".tflite") ? undefined : liteRtModelUrl;
+    const embStatus = await initEmbeddings(url);
     if (!isMountedRef.current) return;
     setEmbeddingStatus(embStatus);
     setEmbeddingBackend(getEmbeddingBackend());
@@ -441,18 +482,22 @@ export function useChat() {
   // Called by ModelManagerPanel when the user clicks "Load" on a cached model.
   // Handles both LLM (.task via MediaPipe) and embedding (.tflite via LiteRT).
 
-  const loadLlmFromCache = useCallback(async (url: string, modelId: string) => {
+  const loadLlmFromCache = useCallback(async (url: string, modelId: string, onProgress?: (pct: number) => void) => {
     setStatus("loading-models");
     setError(null);
     try {
       const isLocalPath = url.startsWith("/") || /^[a-zA-Z]:[/\\]/.test(url);
+      const isLiteRtLm = url.endsWith(".litertlm");
       if (isTauri() && isLocalPath) {
         await loadLmFromPath(url, {
           accelerator: configRef.current?.accelerator,
           scanned: availableModels,
         });
+      } else if (isLiteRtLm) {
+        // .litertlm files run via the WASM engine in the browser
+        await loadWasmFromUrl(url, configRef.current?.maxTokens || 4096, onProgress);
       } else {
-        await loadWebLlm({ modelUrl: url });
+        await loadWebLlm({ modelUrl: url, maxTokens: configRef.current?.maxTokens || 4096 });
       }
       if (!isMountedRef.current) return;
       setActiveLlmModelId(modelId);
@@ -474,7 +519,10 @@ export function useChat() {
     setStatus("loading-models");
     setError(null);
     try {
-      const embStatus = await initEmbeddings(url);
+      // On web, @litertjs/core doesn't support kTfLiteEmbedder models yet —
+      // pass undefined to fall through to USE/BoW instead of erroring.
+      const embedUrl = isTauri() ? url : undefined;
+      const embStatus = await initEmbeddings(embedUrl);
       if (!isMountedRef.current) return;
       setActiveEmbedModelId(modelId);
       setEmbeddingStatus(embStatus);
@@ -1781,7 +1829,7 @@ export function useChat() {
     agents, activeAgent,
     updateConfig,
     loadPreset,
-    loadWebLlmModel, unloadWebLlmModel,
+    loadWebLlmModel, unloadWebLlmModel, loadWasmLlmFromUrl,
     configureApi, initEmbeddingEngine,
     loadLlmFromCache, loadEmbedFromCache,
     retryInit,

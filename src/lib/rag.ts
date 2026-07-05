@@ -91,8 +91,11 @@ async function _init(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
     return { backend: "litert", modelUrl: liteRtModelUrl ?? "" };
   }
 
-  // Web: try LiteRT via @litertjs/core
-  if (liteRtModelUrl) {
+  // Web: try LiteRT via @litertjs/core.
+  // @litertjs/core does not yet support kTfLiteEmbedder (.tflite sentence
+  // embedding) models — skip entirely and fall through to USE/BoW.
+  const canUseLiteRtWeb = liteRtModelUrl && !liteRtModelUrl.endsWith(".tflite");
+  if (canUseLiteRtWeb) {
     try {
       const { loadLiteRt, loadAndCompile } = await import("@litertjs/core");
       if (!liteRtLoaded) {
@@ -100,10 +103,9 @@ async function _init(liteRtModelUrl?: string): Promise<EmbeddingStatus> {
           await loadLiteRt("https://cdn.jsdelivr.net/npm/@litertjs/core/wasm/");
           liteRtLoaded = true;
         } catch (err) {
-          // Reset flag so a subsequent initEmbeddings() call can retry
-          // (e.g. after a StrictMode remount where the WASM may have been GC'd).
           liteRtLoaded = false;
-          throw err;
+          console.warn("[rag] LiteRT WASM load failed:", err);
+          // fall through to USE
         }
       }
       // Release the previous model's WASM heap allocation before loading a new one.
