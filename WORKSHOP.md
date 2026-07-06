@@ -306,7 +306,7 @@ export async function saveConversation(conv: Conversation) {
 
 ---
 
-## Part 3 — AI Fundamentals (Slides 11–17)
+## Part 3 — AI Fundamentals (Slides 11–18)
 
 ### Slide 11 — Large Language Models in One Slide
 
@@ -330,7 +330,46 @@ An LLM is a function: `tokens_in → probability_distribution_over_next_token`.
 
 ---
 
-### Slide 12 — Embeddings: Turning Text into Vectors
+### Slide 12 — Quantization: Fitting a 7B Model in Your Pocket
+
+A neural network is a large array of floating-point numbers called **weights**. Quantization reduces the precision of those numbers to shrink the model and speed up inference.
+
+**Precision formats:**
+```
+FP32  — 32 bits per weight  (training precision, full accuracy)
+FP16  — 16 bits per weight  (2× smaller, negligible quality loss)
+INT8  —  8 bits per weight  (4× smaller, ~1–2% quality loss)
+INT4  —  4 bits per weight  (8× smaller, ~3–5% quality loss)  ← this app
+INT2  —  2 bits per weight  (16× smaller, significant quality loss)
+```
+
+**What changes, what doesn't:**
+```
+Before quantization:   weight = 0.31415926...  (32-bit float)
+After INT4:            weight = 5               (4-bit integer, 0–15)
+                                │
+                         scale factor maps 5 → ≈ 0.314
+```
+
+The model stores a small **scale** and **zero-point** per block of weights. At inference time the integer is dequantized on the fly — the arithmetic stays in float, only storage is compressed.
+
+**Why it matters for on-device:**
+
+| Model | FP32 size | INT4 size | Fits in RAM? |
+|---|---|---|---|
+| Gemma 3 1B | ~4 GB | ~700 MB | ✅ phone / laptop |
+| Gemma 3 4B | ~16 GB | ~2.5 GB | ✅ laptop |
+| Gemma 3 27B | ~108 GB | ~17 GB | ❌ most devices |
+
+**Quantization schemes used in this app:**
+- `INT4` weights + `FP32` activations — best quality/size trade-off for Gemma
+- Block-wise quantization (128 weights per block) — limits accuracy loss vs. per-tensor
+
+> Speaker note: The quality loss numbers (~5%) are averages across benchmarks. For chat tasks the perceptual difference between FP32 and INT4 Gemma 3 1B is hard to notice. The bigger practical concern is that INT4 models can occasionally produce more repetitive or less coherent output on long contexts — the KV-cache is still in FP16 so that part is unaffected.
+
+---
+
+### Slide 13 — Embeddings: Turning Text into Vectors
 
 An embedding model maps text to a fixed-size vector in a semantic space.
 
@@ -353,7 +392,7 @@ Semantically similar texts → high cosine similarity (close to 1).
 
 ---
 
-### Slide 13 — The BERT Tokenizer (WordPiece)
+### Slide 14 — The BERT Tokenizer (WordPiece)
 
 Before embedding, text must be tokenized into integer IDs.
 
@@ -388,7 +427,7 @@ while (inputIds.length < 128) inputIds.push(PAD_ID);
 
 ---
 
-### Slide 14 — RAG: Retrieval-Augmented Generation
+### Slide 15 — RAG: Retrieval-Augmented Generation
 
 The problem: LLMs have a fixed knowledge cutoff and a limited context window. They can't know about your documents.
 
@@ -414,7 +453,7 @@ User query ──► Embed ──► Search DB ──► Top-K chunks
 
 ---
 
-### Slide 15 — Hybrid Search: Vector + BM25
+### Slide 16 — Hybrid Search: Vector + BM25
 
 Pure vector search misses exact keyword matches. Pure BM25 misses semantic similarity. Combine both.
 
@@ -443,7 +482,7 @@ Merged results:  [doc1, doc3, doc5, doc7, ...]
 
 ---
 
-### Slide 16 — The ReAct Loop: LLMs That Use Tools
+### Slide 17 — The ReAct Loop: LLMs That Use Tools
 
 **ReAct** (Reason + Act): the LLM interleaves reasoning and tool calls.
 
@@ -472,7 +511,7 @@ LLM: GDP per capita = $3.1T / 68M = $45,588
 
 ---
 
-### Slide 17 — Agent Routing
+### Slide 18 — Agent Routing
 
 Every message goes through a **router** before the actual response.
 
@@ -503,9 +542,9 @@ Actual response
 
 ---
 
-## Part 4 — One-Shot Chat with LiteRT (Slides 18–23)
+## Part 4 — One-Shot Chat with LiteRT (Slides 19–24)
 
-### Slide 18 — TensorFlow Lite → LiteRT → MediaPipe: A Lineage
+### Slide 19 — TensorFlow Lite → LiteRT → MediaPipe: A Lineage
 
 ```
 2017  TensorFlow Lite
@@ -557,7 +596,7 @@ Both branches run the same Gemma weights. The split is purely about **deployment
 
 ---
 
-### Slide 19 — What is LiteRT?
+### Slide 20 — What is LiteRT?
 
 LiteRT (formerly TensorFlow Lite) is Google's on-device ML runtime.
 
@@ -578,7 +617,7 @@ Gemma 4 E2B INT4 (native) → .litertlm   (~1.5 GB)  LiteRT-LM
 
 ---
 
-### Slide 20 — Loading a Model
+### Slide 21 — Loading a Model
 
 **Download the model** (Tauri — streams to disk with progress):
 ```typescript
@@ -613,7 +652,7 @@ async fn download_model(app: AppHandle, model_id: String,
 
 ---
 
-### Slide 21 — Streaming Inference
+### Slide 22 — Streaming Inference
 
 **Load the model:**
 ```typescript
@@ -656,7 +695,7 @@ await invoke("plugin:litert|generate_stream", {
 
 ---
 
-### Slide 22 — Four LLM Backends, One Interface
+### Slide 23 — Four LLM Backends, One Interface
 
 The app selects the best available backend automatically:
 
@@ -690,7 +729,7 @@ export async function* generateStream(
 
 ---
 
-### Slide 23 — Platform Support Matrix
+### Slide 24 — Platform Support Matrix
 
 | Platform | LLM runtime | Model format | Hardware acceleration | Storage |
 |---|---|---|---|---|
@@ -715,9 +754,9 @@ Both formats package the same Gemma weights; only the container and runtime diff
 
 ---
 
-## Part 5 — Persistent Memory with Couchbase Lite (Slides 23–27)
+## Part 5 — Persistent Memory with Couchbase Lite (Slides 26–30)
 
-### Slide 23 — What is Couchbase Lite?
+### Slide 25 — What is Couchbase Lite?
 
 Couchbase Lite is an embedded NoSQL database for mobile and desktop apps.
 
@@ -742,7 +781,7 @@ _default.agents          Agent definitions
 
 ---
 
-### Slide 24 — Opening the Database
+### Slide 26 — Opening the Database
 
 ```typescript
 // src/lib/db.ts
@@ -771,7 +810,7 @@ await openDatabase(
 
 ---
 
-### Slide 25 — CRUD Operations
+### Slide 27 — CRUD Operations
 
 **Save a document:**
 ```typescript
@@ -813,7 +852,7 @@ await saveDocument("_default.conversations", id, { _deleted: true });
 
 ---
 
-### Slide 26 — N1QL Queries
+### Slide 28 — N1QL Queries
 
 N1QL is SQL for JSON documents. The `META().id` function returns the document ID.
 
@@ -856,7 +895,7 @@ await executeQuery("N1QL",
 
 ---
 
-### Slide 27 — Storing Embeddings
+### Slide 29 — Storing Embeddings
 
 Embeddings are stored as JSON arrays directly on the document:
 
@@ -890,9 +929,9 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 
 ---
 
-## Part 6 — RAG with Vector Search (Slides 28–32)
+## Part 6 — RAG with Vector Search (Slides 30–34)
 
-### Slide 28 — Ingesting a Document
+### Slide 30 — Ingesting a Document
 
 The ingest pipeline: text → chunks → embeddings → database.
 
@@ -932,7 +971,7 @@ Overlap = 64 tokens ensures context isn't lost at chunk boundaries.
 
 ---
 
-### Slide 29 — The Embedding Pipeline
+### Slide 31 — The Embedding Pipeline
 
 Three backends, selected automatically:
 
@@ -965,7 +1004,7 @@ text ──────────────► bagOfWords(text)             
 
 ---
 
-### Slide 30 — Retrieval: From Query to Context
+### Slide 32 — Retrieval: From Query to Context
 
 ```typescript
 // src/lib/rag.ts
@@ -1002,7 +1041,7 @@ export async function retrieveTopK(
 
 ---
 
-### Slide 31 — Injecting Context into the Prompt
+### Slide 33 — Injecting Context into the Prompt
 
 ```typescript
 // src/lib/llm.ts (simplified)
@@ -1039,7 +1078,7 @@ const truncated = truncateHistory(messages, inputBudget);
 
 ---
 
-### Slide 32 — Demo: Ingest a PDF and Query It
+### Slide 34 — Demo: Ingest a PDF and Query It
 
 **Step 1 — Ingest:**
 1. Open the Knowledge panel
@@ -1074,9 +1113,9 @@ User: What are the main conclusions of the document?
 
 ---
 
-## Part 7 — Tools (Slides 33–36)
+## Part 7 — Tools (Slides 35–38)
 
-### Slide 33 — Tool Architecture
+### Slide 35 — Tool Architecture
 
 Tools are plain TypeScript objects with a schema and an `execute` function:
 
@@ -1107,7 +1146,7 @@ export interface Tool {
 
 ---
 
-### Slide 34 — A Safe Math Evaluator
+### Slide 36 — A Safe Math Evaluator
 
 The `calculator` tool uses a recursive descent parser — no `eval()`.
 
@@ -1149,7 +1188,7 @@ The recursive descent parser only accepts numbers, operators, and whitelisted `M
 
 ---
 
-### Slide 35 — Tool Call Parsing
+### Slide 37 — Tool Call Parsing
 
 The LLM emits tool calls as XML embedded in its response:
 
@@ -1184,7 +1223,7 @@ LLMs are more reliable at generating well-formed XML tags than JSON embedded in 
 
 ---
 
-### Slide 36 — Demo: Calculator + Wikipedia
+### Slide 38 — Demo: Calculator + Wikipedia
 
 **Enable tools** in the chat settings, then ask:
 
@@ -1215,9 +1254,9 @@ LLM: The square root of France's population (~68.4 million) is approximately 8,2
 
 ---
 
-## Part 8 — Agents & Router (Slides 37–41)
+## Part 8 — Agents & Router (Slides 39–43)
 
-### Slide 37 — What is an Agent?
+### Slide 39 — What is an Agent?
 
 In this app, an agent is a named persona with:
 - A **system prompt** (personality, constraints, tone)
@@ -1249,7 +1288,7 @@ export interface Agent {
 
 ---
 
-### Slide 38 — The Router in Detail
+### Slide 40 — The Router in Detail
 
 ```typescript
 // src/lib/llm.ts (simplified)
@@ -1287,7 +1326,7 @@ User message: "${userMessage}"`;
 
 ---
 
-### Slide 39 — Full Message Flow
+### Slide 41 — Full Message Flow
 
 ```
 User sends message
@@ -1332,7 +1371,7 @@ User sends message
 
 ---
 
-### Slide 40 — Creating a Custom Agent
+### Slide 42 — Creating a Custom Agent
 
 **Via the UI:**
 1. Open the Agents panel
@@ -1363,7 +1402,7 @@ await saveAgent({
 
 ---
 
-### Slide 41 — Demo: Multi-Agent Routing
+### Slide 43 — Demo: Multi-Agent Routing
 
 **Setup:** Create two agents:
 - **Chef**: "You are a professional chef. Answer only questions about cooking and recipes."
@@ -1389,9 +1428,9 @@ await saveAgent({
 
 ---
 
-## Part 9 — Conclusion & Limits (Slides 42–44)
+## Part 9 — Conclusion & Limits (Slides 44–46)
 
-### Slide 42 — What We Built
+### Slide 44 — What We Built
 
 A fully offline AI desktop app with:
 
@@ -1414,7 +1453,7 @@ A fully offline AI desktop app with:
 
 ---
 
-### Slide 43 — Known Limits & Trade-offs
+### Slide 45 — Known Limits & Trade-offs
 
 **Performance:**
 - 1B model: ~30 tok/s CPU, ~130 tok/s GPU. Adequate for chat, slow for batch processing.
@@ -1437,7 +1476,7 @@ A fully offline AI desktop app with:
 
 ---
 
-### Slide 44 — Resources & Next Steps
+### Slide 46 — Resources & Next Steps
 
 **This repository:**
 ```
