@@ -46,9 +46,110 @@ fn macos_fixups() {
 // the DLLs next to the binary via rustc-link-search, which is sufficient for
 // `cargo run`. For `tauri build` the bundler copies them via tauri.conf.json
 // `externalBin` / `resources`. No rpath emission needed.
+// ── Windows runtime DLL fixups ────────────────────────────────────────────────
+//
+// Windows has no rpath. The dynamic linker searches the directory containing
+// the executable, then PATH. For both `cargo tauri dev` and `tauri build` the
+// binary lands in target/<profile>/; we copy DLLs there directly so they are
+// found at runtime without any PATH manipulation.
+//
+// DLLs required at runtime:
+//   litert-sys cache    → libLiteRt.dll, libLiteRtWebGpuAccelerator.dll,
+//                         libLiteRtTopKWebGpuSampler.dll
+//   cblite git checkout → cblite.dll
+//
+// litert-lm-sys has no Windows DLL (WASM fallback); its stubs are pure Rust.
+//
+// OUT_DIR is  target/<profile>/build/<crate>-<hash>/out/
+// The binary is target/<profile>/  →  three levels up from OUT_DIR.
+
+const LITERT_SYS_WIN_TAG: &str = "v0.10.2"; // must match litert-sys LITERT_LM_TAG
+
 fn windows_fixups() {
     println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LIB_DIR");
     println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LITERT_LIB_DIR");
+
+    let target     = std::env::var("TARGET").unwrap_or_default();
+    let cache_root = cache_root();
+    let cargo_home = cargo_home();
+
+    // Derive the profile output directory (target/debug/ or target/release/)
+    // from OUT_DIR by walking three levels up: out/ → <hash>/ → build/ → <profile>/
+    let out_dir  = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let bin_dir  = out_dir.ancestors().nth(3)
+        .expect("OUT_DIR has unexpected depth")
+        .to_path_buf();
+
+    // ── litert-sys DLLs ───────────────────────────────────────────────────────
+    let litert_cache = cache_root
+        .join("litert-sys")
+        .join(LITERT_SYS_WIN_TAG)
+        .join(&target);
+
+    for dll in &[
+        "libLiteRt.dll",
+        "libLiteRtWebGpuAccelerator.dll",
+        "libLiteRtTopKWebGpuSampler.dll",
+    ] {
+        let src = litert_cache.join(dll);
+        println!("cargo:rerun-if-changed={}", src.display());
+        if src.exists() {
+            let dst = bin_dir.join(dll);
+            if file_size(&src) != file_size(&dst) {
+                std::fs::copy(&src, &dst)
+                    .unwrap_or_else(|e| panic!("copy {dll} to bin dir: {e}"));
+                println!("cargo:warning=build.rs: copied {dll} to {}", bin_dir.display());
+            }
+        } else {
+            println!("cargo:warning=build.rs: {dll} not in litert-sys cache yet \
+                      ({}) — will be available after litert-sys downloads it",
+                     src.display());
+        }
+    }
+
+    // ── cblite.dll ────────────────────────────────────────────────────────────
+    let cblite_dll = (|| {
+        let checkouts = cargo_home.join("git").join("checkouts");
+        let entries = std::fs::read_dir(&checkouts).ok()?;
+        for entry in entries.flatten() {
+            if !entry.file_name().to_string_lossy().starts_with("couchbase-lite-rust") {
+                continue;
+            }
+            if let Ok(commits) = std::fs::read_dir(entry.path()) {
+                for commit in commits.flatten() {
+                    let candidate = commit.path()
+                        .join("libcblite_community")
+                        .join("lib")
+                        .join(&target)
+                        .join("cblite.dll");
+                    if candidate.exists() {
+                        return Some(candidate);
+                    }
+                }
+            }
+        }
+        None
+    })();
+
+    match cblite_dll {
+        Some(src) => {
+            println!("cargo:rerun-if-changed={}", src.display());
+            let dst = bin_dir.join("cblite.dll");
+            if file_size(&src) != file_size(&dst) {
+                std::fs::copy(&src, &dst)
+                    .unwrap_or_else(|e| panic!("copy cblite.dll to bin dir: {e}"));
+                println!("cargo:warning=build.rs: copied cblite.dll to {}", bin_dir.display());
+            }
+        }
+        None => {
+            println!("cargo:warning=build.rs: cblite.dll not found in cargo git checkouts");
+        }
+    }
+
+    // Emit link-search pointing at the bin dir so the linker resolves DLL
+    // import stubs at build time (litert-sys already emits its cache dir, but
+    // belt-and-suspenders doesn't hurt).
+    println!("cargo:rustc-link-search=native={}", bin_dir.display());
 }
 
 // ── Linux runtime library fixups ─────────────────────────────────────────────
