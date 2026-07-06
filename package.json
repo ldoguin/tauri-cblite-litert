@@ -5,8 +5,11 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:web": "vite --config vite.config.web.ts",
     "build": "tsc && vite build",
+    "build:web": "tsc && vite build --config vite.config.web.ts",
     "preview": "vite preview",
+    "preview:web": "vite preview --config vite.config.web.ts --outDir dist-web",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src packages/tauri-plugin-cblite packages/tauri-plugin-litert-api/src",
     "seed:disease-kb": "node scripts/copy-disease-profiles.mjs",
