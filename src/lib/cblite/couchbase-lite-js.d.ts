@@ -1,7 +1,7 @@
 /**
  * Minimal type stub for @couchbase/lite-js.
- * The real package is installed only for the web build target.
- * This stub satisfies tsc during the Tauri build where the package is absent.
+ * Satisfies tsc during the Tauri build where the package may not be installed.
+ * The real package is required for the web build target (pnpm dev:web / build:web).
  */
 declare module "@couchbase/lite-js" {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -12,4 +12,6 @@ declare module "@couchbase/lite-js" {
   export function DocID(id: string): any;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   export function NewBlob(data: Uint8Array, contentType: string): any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  export const LastWriteWins: any;
 }

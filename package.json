@@ -31,6 +31,7 @@
     "test:e2e:docker": "docker build -f docker/Dockerfile.e2e -t cblite-e2e . && docker run --rm --network host -e TAURI_BINARY=/bundle/tauri-cblite-litert -v $(pwd)/dist/e2e-bundle:/bundle:ro cblite-e2e"
   },
   "dependencies": {
+    "@couchbase/lite-js": "^1.0.1",
     "@litert-lm/core": "^0.14.0",
     "@litertjs/core": "^2.5.0",
     "@mediapipe/tasks-genai": "^0.10.0",

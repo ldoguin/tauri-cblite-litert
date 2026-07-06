@@ -8,36 +8,30 @@
  * web (browser) target.  The Tauri target resolves to src/lib/cblite/tauri.ts.
  *
  * Notes:
- * - @couchbase/lite-js does not expose the built-in _default collection via
- *   getCollection('_default'), so we map "_default" → "config" internally.
  * - createFtsIndex / listIndexes are not yet exposed by the JS SDK; they are
- *   no-ops here.  FTS queries will fall back to a JS-side filter in db.ts.
+ *   no-ops here.  FTS queries fall back to N1QL LIKE in db.ts.
  * - registerPredictiveModel / unregisterPredictiveModel are not supported in
  *   the browser; calls are silently ignored.
  */
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-type AnyRecord = Record<string, any>;
+import {
+  Database,
+  Replicator,
+  DocID,
+  NewBlob,
+  LastWriteWins,
+} from "@couchbase/lite-js";
 
-// Lazily resolved @couchbase/lite-js exports
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let _cbl: any = null;
-async function cbl(): Promise<AnyRecord> {
-  if (!_cbl) _cbl = await import("@couchbase/lite-js");
-  return _cbl;
-}
+// ── Module-level state ────────────────────────────────────────────────────────
 
-// Module-level state
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let db: any = null;
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let replicator: any = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const activeListenerTokens: Array<{ coll: any; token: any }> = [];
 let _replicationStatusHandler: ((activity: string, error?: string) => void) | null = null;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const activeListenerTokens: any[] = [];
 
-// All collections used by this app.  "_default" is mapped to "config" because
-// @couchbase/lite-js does not expose the built-in _default collection.
 const NAMED_COLLECTIONS = [
   "conversations", "messages", "knowledge", "config",
   "agents", "pdfs", "products", "inspections", "clinical",
@@ -46,10 +40,7 @@ const NAMED_COLLECTIONS = [
 ] as const;
 
 function resolveCollectionName(name: string): string {
-  // Strip the "_default." scope prefix used by the Tauri plugin convention.
-  const bare = name.replace(/^_default\./, "");
-  // The built-in _default collection is not accessible by name in the JS SDK.
-  return bare === "_default" ? "config" : bare;
+  return name.replace(/^_default\./, "");
 }
 
 // ── Public constants ──────────────────────────────────────────────────────────
@@ -66,14 +57,12 @@ export async function openDatabase(
   _collections?: string[],
 ): Promise<void> {
   if (db) {
-    try { await closeDatabase(); } catch { /* ignore */ }
+    try { db.close(); } catch { /* ignore */ }
+    db = null;
   }
-
-  const { Database } = await cbl();
-
-  const collectionsConfig: AnyRecord = {};
-  for (const c of NAMED_COLLECTIONS) collectionsConfig[c] = {};
-
+  const collectionsConfig = Object.fromEntries(
+    NAMED_COLLECTIONS.map((c) => [c, {}]),
+  );
   db = await Database.open({ name, version: 1, collections: collectionsConfig });
 }
 
@@ -81,25 +70,30 @@ export async function openDatabase(
 
 export async function closeDatabase(): Promise<void> {
   if (!db) return;
-  for (const { coll, token } of activeListenerTokens) {
-    try { coll.removeChangeListener(token); } catch { /* ignore */ }
+  for (const token of activeListenerTokens) {
+    try { token.remove(); } catch { /* ignore */ }
   }
   activeListenerTokens.length = 0;
   _replicationStatusHandler = null;
-  try { await db.close(); } catch { /* ignore */ }
+  if (replicator) {
+    try { replicator.stop(); } catch { /* ignore */ }
+    replicator = null;
+  }
+  try { db.close(); } catch { /* ignore */ }
   db = null;
 }
 
 // ── Internal helpers ──────────────────────────────────────────────────────────
 
-function requireDb(): void {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function requireDb(): any {
   if (!db) throw new Error("[cblite-web] Database is not open");
+  return db;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function getCollection(collectionName: string): any {
-  requireDb();
-  return db.getCollection(resolveCollectionName(collectionName));
+  return requireDb().getCollection(resolveCollectionName(collectionName));
 }
 
 // ── getDocument ───────────────────────────────────────────────────────────────
@@ -108,10 +102,12 @@ export async function getDocument(
   collection: string,
   docId: string,
 ): Promise<unknown> {
-  const { DocID } = await cbl();
   const coll = getCollection(collection);
   const doc = await coll.getDocument(DocID(docId));
-  return doc ?? null;
+  if (!doc) throw new Error(`Document not found: ${docId}`);
+  // Spread all enumerable properties into a plain object
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return { id: docId, ...Object.fromEntries(Object.keys(doc).map((k: string) => [k, (doc as any)[k]])) };
 }
 
 // ── saveDocument ──────────────────────────────────────────────────────────────
@@ -122,16 +118,15 @@ export async function saveDocument(
   body: unknown,
   _encryptedFields?: string[],
 ): Promise<void> {
-  const { DocID } = await cbl();
   const coll = getCollection(collection);
-  const data = body as AnyRecord;
-
+  const data = body as Record<string, unknown>;
   const existing = await coll.getDocument(DocID(docId));
   if (existing) {
     for (const [k, v] of Object.entries(data)) existing[k] = v;
-    await coll.save(existing);
+    await coll.save(existing, LastWriteWins);
   } else {
-    await coll.save(coll.createDocument(DocID(docId), data));
+    const doc = coll.createDocument(DocID(docId), data);
+    await coll.save(doc);
   }
 }
 
@@ -142,17 +137,23 @@ export async function executeQuery(
   queryStr: string,
   parameters?: Record<string, unknown>,
 ): Promise<unknown[]> {
-  requireDb();
-  // Strip scope prefix: "FROM `_default`.X" or "FROM _default.X" → "FROM X"
+  const database = requireDb();
+  // Strip scope prefix used by the Tauri plugin convention
   const normalized = queryStr
     .replace(/FROM\s+`_default`\./gi, "FROM ")
     .replace(/FROM\s+_default\./gi, "FROM ");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const query: any = db.createQuery(normalized);
-  if (parameters && Object.keys(parameters).length > 0) {
-    query.parameters = parameters;
+  const query = database.createQuery(normalized);
+  if (parameters) {
+    for (const [k, v] of Object.entries(parameters)) query[k] = v;
   }
-  return query.execute();
+  const results = await query.execute();
+  // Collect async iterable into array
+  if (results && Symbol.asyncIterator in results) {
+    const rows: unknown[] = [];
+    for await (const row of results) rows.push(row);
+    return rows;
+  }
+  return Array.isArray(results) ? results : [];
 }
 
 // ── startReplication ──────────────────────────────────────────────────────────
@@ -169,33 +170,30 @@ export async function startReplication(
     try { replicator.stop(); } catch { /* ignore */ }
     replicator = null;
   }
-
-  const { Replicator } = await cbl();
-
-  function dirCfg() {
-    const d: AnyRecord = {};
-    if (direction === "pull" || direction === "both") d.pull = { continuous: true };
-    if (direction === "push" || direction === "both") d.push = { continuous: true };
-    return d;
-  }
-
+  const database = requireDb();
+  const dirCfg = () => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const cfg: any = {};
+    if (direction === "pull" || direction === "both") cfg.pull = { continuous: true };
+    if (direction === "push" || direction === "both") cfg.push = { continuous: true };
+    return cfg;
+  };
   const collNames = [
     resolveCollectionName(collection),
     ...(extraCollections ?? []).map(resolveCollectionName),
   ];
-  const collectionsConfig: AnyRecord = {};
-  for (const c of collNames) collectionsConfig[c] = dirCfg();
-
-  const config: AnyRecord = { database: db, url, collections: collectionsConfig };
+  const collections = Object.fromEntries(collNames.map((c) => [c, dirCfg()]));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const config: any = { database, url, collections };
   if (auth && "username" in auth) {
     config.credentials = { username: auth.username, password: auth.password };
   }
-
   replicator = new Replicator(config);
-  replicator.onStatusChange = (status: AnyRecord) => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  replicator.onStatusChange = (status: any) => {
     if (_replicationStatusHandler) {
       const err: string | undefined = status.error ? String(status.error) : undefined;
-      _replicationStatusHandler(mapActivity(status.status ?? status), err);
+      _replicationStatusHandler(status.status ?? "idle", err);
     }
   };
   replicator.run().catch((err: unknown) => {
@@ -216,26 +214,26 @@ export async function stopReplication(): Promise<void> {
 // ── saveBlob ──────────────────────────────────────────────────────────────────
 
 export async function saveBlob(dataB64: string, contentType: string): Promise<string> {
-  const { DocID, NewBlob } = await cbl();
   const buffer = Uint8Array.from(atob(dataB64), (c) => c.charCodeAt(0));
-  const blob = new NewBlob(buffer, contentType);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const blob = new (NewBlob as any)(buffer, contentType);
   const blobId = "blob-" + crypto.randomUUID();
   const coll = getCollection("blobs");
-  await coll.save(coll.createDocument(DocID(blobId), { data: blob, contentType }));
+  const doc = coll.createDocument(DocID(blobId), { data: blob, contentType });
+  await coll.save(doc);
   return blobId;
 }
 
 // ── getBlobData ───────────────────────────────────────────────────────────────
 
 export async function getBlobData(digest: string): Promise<string> {
-  const { DocID } = await cbl();
   const coll = getCollection("blobs");
   const doc = await coll.getDocument(DocID(digest));
   if (!doc) throw new Error(`[cblite-web] Blob not found: ${digest}`);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const blob: any = doc.data;
-  if (!blob) throw new Error(`[cblite-web] Blob document has no 'data' field: ${digest}`);
-  const contents: Uint8Array = await blob.getContents();
+  const blobData = (doc as any).data;
+  if (!blobData) throw new Error(`[cblite-web] Blob document has no data field: ${digest}`);
+  const contents: Uint8Array = await blobData.getContents();
   let binary = "";
   for (let i = 0; i < contents.length; i++) binary += String.fromCharCode(contents[i]);
   return btoa(binary);
@@ -246,24 +244,22 @@ export async function getBlobData(digest: string): Promise<string> {
 export async function onCollectionChanged(
   handler: (docIds: string[]) => void,
 ): Promise<() => void> {
-  const localTokens: Array<{ coll: unknown; token: unknown }> = [];
-
-  // Listen on the collections most likely to drive UI updates.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const localTokens: any[] = [];
   for (const collName of ["conversations", "messages", "knowledge"] as const) {
     const coll = getCollection(collName);
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const token = coll.addChangeListener((changes: any) => {
       handler(Array.isArray(changes.documentIDs) ? changes.documentIDs : []);
     });
-    const entry = { coll, token };
-    localTokens.push(entry);
-    activeListenerTokens.push(entry);
+    localTokens.push(token);
+    activeListenerTokens.push(token);
   }
-
   return () => {
-    for (const { coll, token } of localTokens) {
-      try { (coll as AnyRecord).removeChangeListener(token); } catch { /* ignore */ }
-      const idx = activeListenerTokens.findIndex((t) => t.token === token);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    for (const token of localTokens) {
+      try { token.remove(); } catch { /* ignore */ }
+      const idx = activeListenerTokens.indexOf(token);
       if (idx >= 0) activeListenerTokens.splice(idx, 1);
     }
   };
@@ -276,9 +272,8 @@ export async function onReplicationStatus(
 ): Promise<() => void> {
   _replicationStatusHandler = handler;
   if (replicator) {
-    replicator.onStatusChange = (status: AnyRecord) => {
-      handler(mapActivity(status.status ?? status));
-    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    replicator.onStatusChange = (status: any) => handler(status.status ?? "idle");
   }
   return () => { _replicationStatusHandler = null; };
 }
@@ -297,8 +292,6 @@ export async function unregisterPredictiveModel(_name: string): Promise<void> {
 }
 
 // ── FTS index stubs ───────────────────────────────────────────────────────────
-// @couchbase/lite-js does not yet expose FTS index management.  db.ts falls
-// back to JS-side filtering for FTS queries when running in the browser.
 
 export async function createFtsIndex(
   _collection: string,
@@ -306,20 +299,9 @@ export async function createFtsIndex(
   _field: string,
   _language?: string,
 ): Promise<void> {
-  console.warn("[cblite-web] createFtsIndex is not supported in the browser — FTS queries will use JS-side filtering");
+  // no-op: @couchbase/lite-js does not expose FTS index management yet
 }
 
 export async function listIndexes(_collection: string): Promise<string[]> {
   return [];
-}
-
-// ── Internal helpers ──────────────────────────────────────────────────────────
-
-function mapActivity(status: string | undefined): string {
-  if (!status) return "idle";
-  const s = String(status).toLowerCase();
-  if (s.includes("stop") || s.includes("offline")) return "stopped";
-  if (s.includes("connect")) return "connecting";
-  if (s.includes("busy") || s.includes("activ")) return "busy";
-  return "idle";
 }
