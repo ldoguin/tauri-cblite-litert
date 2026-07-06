@@ -503,9 +503,61 @@ Actual response
 
 ---
 
-## Part 4 — One-Shot Chat with LiteRT (Slides 18–22)
+## Part 4 — One-Shot Chat with LiteRT (Slides 18–23)
 
-### Slide 18 — What is LiteRT?
+### Slide 18 — TensorFlow Lite → LiteRT → MediaPipe: A Lineage
+
+```
+2017  TensorFlow Lite
+      └─ Google's first on-device ML runtime
+         Runs .tflite flatbuffer models on mobile (Android/iOS)
+         CPU only at launch; GPU delegate added 2018
+
+2019  MediaPipe
+      └─ Pipeline framework built on top of TF Lite
+         Pre-packaged solutions: face detection, pose, hands, …
+         Introduced the .task bundle format (model + metadata + config)
+
+2023  LiteRT  (TensorFlow Lite renamed)
+      └─ Same runtime, new brand under Google AI Edge
+         Broader hardware support: CPU, GPU, NPU, DSP
+         Decoupled from TensorFlow the training framework
+
+2024  LiteRT-LM
+      └─ LLM-specific layer on top of LiteRT
+         Optimised KV-cache, INT4/INT8 quantisation, streaming tokens
+         Introduces the .litertlm model format
+         Powers Gemma on-device across Android, iOS, desktop
+
+2024  MediaPipe Tasks GenAI
+      └─ LLM inference via the MediaPipe Tasks API
+         Runs in the browser over WebGPU or Wasm
+         Uses the .task bundle format (same weights, different container)
+```
+
+**How they relate today:**
+
+```
+                    Google AI Edge
+                         │
+          ┌──────────────┴──────────────┐
+          │                             │
+       LiteRT                      MediaPipe
+   (native runtime)            (pipeline framework)
+          │                             │
+     LiteRT-LM                  Tasks GenAI API
+   (.litertlm format)           (.task format)
+          │                             │
+   Tauri plugin (Rust)        Browser / WebView (JS)
+```
+
+Both branches run the same Gemma weights. The split is purely about **deployment target**: native binary vs. browser sandbox.
+
+> Speaker note: The rename from TensorFlow Lite to LiteRT in 2023 was partly to signal independence from the TensorFlow training ecosystem — you don't need TF to use LiteRT. MediaPipe was always a separate project (originally for real-time video pipelines at Google) that adopted TF Lite as its inference engine. The Tasks GenAI API is the part of MediaPipe that handles LLMs in the browser; it is what this app uses on Windows and in the web fallback.
+
+---
+
+### Slide 19 — What is LiteRT?
 
 LiteRT (formerly TensorFlow Lite) is Google's on-device ML runtime.
 
@@ -526,7 +578,7 @@ Gemma 4 E2B INT4 (native) → .litertlm   (~1.5 GB)  LiteRT-LM
 
 ---
 
-### Slide 19 — Loading a Model
+### Slide 20 — Loading a Model
 
 **Download the model** (Tauri — streams to disk with progress):
 ```typescript
@@ -561,7 +613,7 @@ async fn download_model(app: AppHandle, model_id: String,
 
 ---
 
-### Slide 20 — Streaming Inference
+### Slide 21 — Streaming Inference
 
 **Load the model:**
 ```typescript
@@ -604,7 +656,7 @@ await invoke("plugin:litert|generate_stream", {
 
 ---
 
-### Slide 21 — Four LLM Backends, One Interface
+### Slide 22 — Four LLM Backends, One Interface
 
 The app selects the best available backend automatically:
 
@@ -638,7 +690,7 @@ export async function* generateStream(
 
 ---
 
-### Slide 22 — Platform Support Matrix
+### Slide 23 — Platform Support Matrix
 
 | Platform | LLM runtime | Model format | Hardware acceleration | Storage |
 |---|---|---|---|---|
