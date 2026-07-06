@@ -213,6 +213,16 @@ export async function loadLmFromPath(
   const platform = await getAppPlatform();
   const caps = resolveModelCapabilities(modelPath, platform, opts?.scanned ?? []);
 
+  // On Windows, LiteRtLmC.dll is not available — use the WASM engine instead.
+  if (platform === "windows") {
+    const { convertFileSrc } = await import("@tauri-apps/api/core");
+    const modelUrl = convertFileSrc(modelPath);
+    await loadWasmModel(modelUrl, caps.contextLength || 2048);
+    setActiveLmModel(LM_MODEL_ID);
+    setActiveContextLength(caps.contextLength || 4096);
+    return;
+  }
+
   let cacheDir: string | undefined;
   try {
     const { appLocalDataDir, join } = await import("@tauri-apps/api/path");
