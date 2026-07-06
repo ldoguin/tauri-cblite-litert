@@ -10,12 +10,15 @@
 **Build an Offline AI Desktop App**
 *Tauri · LiteRT · Couchbase Lite*
 
-> Speaker note: Introduce yourself. Ask the audience: "Who has shipped an LLM feature to production? Who has had to deal with data-privacy constraints that prevented sending data to a cloud API?" This workshop is the answer to both.
+> Speaker note: Introduce yourself. Ask the audience two questions: "Who has shipped an LLM feature to production?" and "Who has had to deal with data-privacy constraints — either for AI inference or for where your data is stored?" This workshop addresses both. The insight is that cloud AI and cloud data are the same class of problem: a dependency on remote infrastructure that breaks privacy, offline use, and cost predictability.
 
 ---
 
-### Slide 2 — The Problem with Cloud AI
+### Slide 2 — The Problem with Cloud Dependencies
 
+The same dependency on remote infrastructure affects both AI and data.
+
+**Cloud AI:**
 ```
 User query ──► Cloud API ──► Response
                   │
@@ -29,17 +32,36 @@ Pain points:
 - **Cost**: token pricing at scale is non-trivial
 - **Availability**: no network = no AI
 
-> Speaker note: Show a real pricing table (GPT-4o: ~$5/M input tokens). For a document-heavy enterprise app processing 10 M tokens/day, that's $50k/month. On-device inference is free after the model download.
+**Cloud data:**
+```
+App ──► Remote DB ──► Query result
+            │
+      Your data lives
+      on someone else's server
+```
+
+Pain points:
+- **Privacy**: documents, embeddings, and conversation history sent to a third party
+- **Latency**: every read/write crosses the network
+- **Offline**: app is broken without connectivity
+- **Sync complexity**: conflict resolution, eventual consistency, schema migrations
+
+> Speaker note: These two problems compound each other. An app that sends queries to a cloud LLM *and* stores its data in a cloud database has two separate privacy exposure points, two availability dependencies, and two sources of latency. Solving one without the other is only half the answer.
 
 ---
 
-### Slide 3 — The Solution: On-Device AI
+### Slide 3 — The Solution: On-Device AI and Data
 
 ```
 User query ──► Local Model ──► Response
                   │
             Data never leaves
             the device
+
+App ──► Local DB ──► Query result
+            │
+      Data stays on device,
+      syncs when online
 ```
 
 What we need:
@@ -47,7 +69,9 @@ What we need:
 2. A **database** that stores vectors and documents offline — **Couchbase Lite**
 3. A **shell** that packages a web UI as a native desktop app — **Tauri**
 
-> Speaker note: Each of these is production-grade and used in real apps. LiteRT powers Google's on-device AI across Android. Couchbase Lite is used in healthcare and field-service apps. Tauri is used by 1Password, Cloudflare, and others.
+Together they eliminate the cloud dependency for both inference and storage. The app works fully offline; sync is optional and additive.
+
+> Speaker note: Each of these is production-grade and used in real apps. LiteRT powers Google's on-device AI across Android. Couchbase Lite is used in healthcare and field-service apps where offline-first is a hard requirement (clinics, field engineers, aircraft). Tauri is used by 1Password, Cloudflare, and others.
 
 ---
 
@@ -72,10 +96,12 @@ What we need:
 
 Features we'll build step by step:
 - One-shot chat with a local Gemma model
-- Persistent conversation history in Couchbase Lite
-- RAG over ingested documents (PDF, URL, text)
+- Persistent conversation history in Couchbase Lite (no cloud DB)
+- RAG over ingested documents (PDF, URL, text) — embeddings stored locally
 - Tool use (calculator, web search, Wikipedia)
 - Multi-agent routing
+
+Both the AI and the data are fully on-device. Couchbase Lite can sync to Couchbase Server when a network is available, but the app never requires it.
 
 > Speaker note: The app is isomorphic — every module has a Tauri path and a web fallback. You can open it in a browser and it still works with localStorage and TF.js. This makes development much faster.
 
