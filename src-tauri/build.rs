@@ -54,15 +54,39 @@ fn macos_fixups() {
 // found at runtime without any PATH manipulation.
 //
 // DLLs required at runtime:
-//   litert-sys cache    → libLiteRt.dll, libLiteRtWebGpuAccelerator.dll,
-//                         libLiteRtTopKWebGpuSampler.dll
-//   cblite git checkout → cblite.dll
+//   litert-sys prebuilts → libLiteRt.dll, libLiteRtWebGpuAccelerator.dll,
+//                          libLiteRtTopKWebGpuSampler.dll
+//   cblite git checkout  → cblite.dll
 //
 // litert-lm-sys has no Windows DLL (WASM fallback); its stubs are pure Rust.
+//
+// We cannot rely on litert-sys having already populated its cache: Cargo does
+// not guarantee build-script ordering for transitive dependencies unless there
+// is a `links` edge. Instead we download the DLLs ourselves into our own cache
+// using the same GitHub LFS OIDs that litert-sys uses, then copy them to the
+// binary output directory.
 //
 // OUT_DIR is  target/<profile>/build/<crate>-<hash>/out/
 // The binary is target/<profile>/  →  three levels up from OUT_DIR.
 
+// These OIDs and sizes must match WINDOWS_X86_64 in litert-sys/build.rs.
+const WIN_DLLS: &[(&str, &str, u64)] = &[
+    (
+        "libLiteRt.dll",
+        "d87f00b4161046f23c911fe8f64224bcbdff8399be792bcb62bf95b52cbbccc5",
+        11_013_632,
+    ),
+    (
+        "libLiteRtWebGpuAccelerator.dll",
+        "69a8b4671fe5f9f16054b5be211c484d954b95fbf459359d445319c6039b176b",
+        21_816_320,
+    ),
+    (
+        "libLiteRtTopKWebGpuSampler.dll",
+        "31cfc379259d553ea4eeb7f4f949f116629b4882feafce343de57d2e837b3903",
+        16_971_776,
+    ),
+];
 const LITERT_SYS_WIN_TAG: &str = "v0.10.2"; // must match litert-sys LITERT_LM_TAG
 
 fn windows_fixups() {
@@ -74,23 +98,38 @@ fn windows_fixups() {
     let cargo_home = cargo_home();
 
     // Derive the profile output directory (target/debug/ or target/release/)
-    // from OUT_DIR by walking three levels up: out/ → <hash>/ → build/ → <profile>/
-    let out_dir  = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let bin_dir  = out_dir.ancestors().nth(3)
+    // from OUT_DIR: out/ → <hash>/ → build/ → <profile>/
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let bin_dir = out_dir.ancestors().nth(3)
         .expect("OUT_DIR has unexpected depth")
         .to_path_buf();
 
     // ── litert-sys DLLs ───────────────────────────────────────────────────────
+    // Cache under the same path litert-sys uses so both share the download.
     let litert_cache = cache_root
         .join("litert-sys")
         .join(LITERT_SYS_WIN_TAG)
         .join(&target);
+    std::fs::create_dir_all(&litert_cache).expect("create litert-sys cache dir");
 
-    for dll in &[
-        "libLiteRt.dll",
-        "libLiteRtWebGpuAccelerator.dll",
-        "libLiteRtTopKWebGpuSampler.dll",
-    ] {
+    // Resolve download URLs for any DLLs not yet cached via the LFS batch API.
+    let missing: Vec<_> = WIN_DLLS.iter()
+        .filter(|(name, _, size)| file_size(&litert_cache.join(name)) != *size)
+        .collect();
+
+    if !missing.is_empty() {
+        let urls = resolve_lfs_urls_windows(&missing);
+        for (name, _oid, _size) in &missing {
+            let url = urls.get(*name)
+                .unwrap_or_else(|| panic!("no LFS URL resolved for {name}"));
+            let dest = litert_cache.join(name);
+            println!("cargo:warning=build.rs: downloading {name} ({} bytes, first build only)",
+                     WIN_DLLS.iter().find(|(n,_,_)| n == name).unwrap().2);
+            download_file(&dest, url);
+        }
+    }
+
+    for (dll, _, _) in WIN_DLLS {
         let src = litert_cache.join(dll);
         println!("cargo:rerun-if-changed={}", src.display());
         if src.exists() {
@@ -98,12 +137,7 @@ fn windows_fixups() {
             if file_size(&src) != file_size(&dst) {
                 std::fs::copy(&src, &dst)
                     .unwrap_or_else(|e| panic!("copy {dll} to bin dir: {e}"));
-                println!("cargo:warning=build.rs: copied {dll} to {}", bin_dir.display());
             }
-        } else {
-            println!("cargo:warning=build.rs: {dll} not in litert-sys cache yet \
-                      ({}) — will be available after litert-sys downloads it",
-                     src.display());
         }
     }
 
@@ -138,7 +172,6 @@ fn windows_fixups() {
             if file_size(&src) != file_size(&dst) {
                 std::fs::copy(&src, &dst)
                     .unwrap_or_else(|e| panic!("copy cblite.dll to bin dir: {e}"));
-                println!("cargo:warning=build.rs: copied cblite.dll to {}", bin_dir.display());
             }
         }
         None => {
@@ -146,10 +179,67 @@ fn windows_fixups() {
         }
     }
 
-    // Emit link-search pointing at the bin dir so the linker resolves DLL
-    // import stubs at build time (litert-sys already emits its cache dir, but
-    // belt-and-suspenders doesn't hurt).
+    // Belt-and-suspenders: also emit link-search for the bin dir so the linker
+    // can resolve DLL import stubs (litert-sys already emits its cache dir).
     println!("cargo:rustc-link-search=native={}", bin_dir.display());
+}
+
+/// Resolve GitHub LFS download URLs for the given Windows DLL entries via the
+/// LFS batch API. Returns a map of filename → download URL.
+fn resolve_lfs_urls_windows(
+    files: &[&(&'static str, &'static str, u64)],
+) -> std::collections::HashMap<&'static str, String> {
+    #[derive(serde::Deserialize)]
+    struct BatchResp { objects: Vec<LfsObj> }
+    #[derive(serde::Deserialize)]
+    struct LfsObj { oid: String, actions: Option<LfsActions>, error: Option<LfsError> }
+    #[derive(serde::Deserialize)]
+    struct LfsActions { download: LfsHref }
+    #[derive(serde::Deserialize)]
+    struct LfsHref { href: String }
+    #[derive(serde::Deserialize)]
+    struct LfsError { message: String }
+
+    let objects: Vec<_> = files.iter().map(|(_, oid, size)| {
+        serde_json::json!({ "oid": oid, "size": size })
+    }).collect();
+
+    let body = serde_json::json!({
+        "operation": "download",
+        "transfers": ["basic"],
+        "objects": objects,
+    }).to_string();
+
+    let resp = ureq::post(
+        "https://github.com/google-ai-edge/litert-lm.git/info/lfs/objects/batch"
+    )
+    .set("Accept", "application/vnd.git-lfs+json")
+    .set("Content-Type", "application/vnd.git-lfs+json")
+    .send_string(&body)
+    .unwrap_or_else(|e| panic!("LFS batch request failed: {e}"));
+
+    let parsed: BatchResp = serde_json::from_reader(resp.into_reader())
+        .expect("parse LFS batch response");
+
+    // Build oid → url map, then re-key by filename.
+    let oid_to_url: std::collections::HashMap<_, _> = parsed.objects.into_iter()
+        .map(|obj| {
+            if let Some(err) = obj.error {
+                panic!("LFS server refused oid {}: {}", obj.oid, err.message);
+            }
+            let href = obj.actions
+                .unwrap_or_else(|| panic!("LFS object {} has no actions", obj.oid))
+                .download.href;
+            (obj.oid, href)
+        })
+        .collect();
+
+    files.iter().map(|(name, oid, _)| {
+        let url = oid_to_url.get(*oid)
+            .unwrap_or_else(|| panic!("LFS batch response missing URL for {name}"))
+            .clone();
+        (*name, url)
+    }).collect()
 }
 
 // ── Linux runtime library fixups ─────────────────────────────────────────────
