@@ -503,7 +503,7 @@ Actual response
 
 ---
 
-## Part 4 — One-Shot Chat with LiteRT (Slides 18–21)
+## Part 4 — One-Shot Chat with LiteRT (Slides 18–22)
 
 ### Slide 18 — What is LiteRT?
 
@@ -635,13 +635,37 @@ export async function* generateStream(
 ```
 
 **Demo checkpoint:** Open the Model Manager panel, download Gemma 3 1B, load it, and send a message. You should see tokens streaming in real time with no network requests.
+
+---
+
+### Slide 22 — Platform Support Matrix
+
+| Platform | LLM runtime | Model format | Hardware acceleration | Storage |
+|---|---|---|---|---|
+| **macOS (Apple Silicon)** | LiteRT-LM native | `.litertlm` | Metal GPU | Couchbase Lite |
+| **macOS (Intel)** | LiteRT-LM native | `.litertlm` | CPU | Couchbase Lite |
+| **Linux x86\_64** | LiteRT-LM native | `.litertlm` | Vulkan GPU / CPU | Couchbase Lite |
+| **Linux aarch64** | LiteRT-LM native | `.litertlm` | CPU | Couchbase Lite |
+| **Windows x86\_64** | MediaPipe (WebGPU/Wasm) | `.task` | WebGPU / Wasm | Couchbase Lite |
+| **Android arm64** | LiteRT-LM native | `.litertlm` | GPU delegate / CPU | Couchbase Lite |
+| **Browser (any OS)** | MediaPipe (WebGPU/Wasm) | `.task` | WebGPU / Wasm | localStorage |
+
+**Why Windows uses the WASM backend:** Google has not shipped a `LiteRtLmC.dll` for Windows. The native plugin compiles (Rust stubs satisfy the linker) but LLM inference falls back to MediaPipe Tasks running in the WebView's WebGPU context. Performance is lower than native but the app is fully functional.
+
+**Model formats:**
+- `.litertlm` — LiteRT-LM binary format, loaded by the native Rust plugin
+- `.task` — MediaPipe Tasks bundle, loaded by `@mediapipe/tasks-genai` in the WebView
+
+Both formats package the same Gemma weights; only the container and runtime differ.
+
+> Speaker note: The matrix is the payoff of the isomorphic architecture. The same TypeScript business logic runs everywhere; only the backend selected by `getActiveBackend()` changes. A user on Windows gets a working app today; when Google ships a Windows DLL, the native path activates automatically with no code changes.
 <!-- §5 COUCHBASE -->
 
 ---
 
-## Part 5 — Persistent Memory with Couchbase Lite (Slides 22–26)
+## Part 5 — Persistent Memory with Couchbase Lite (Slides 23–27)
 
-### Slide 22 — What is Couchbase Lite?
+### Slide 23 — What is Couchbase Lite?
 
 Couchbase Lite is an embedded NoSQL database for mobile and desktop apps.
 
@@ -666,7 +690,7 @@ _default.agents          Agent definitions
 
 ---
 
-### Slide 23 — Opening the Database
+### Slide 24 — Opening the Database
 
 ```typescript
 // src/lib/db.ts
@@ -695,7 +719,7 @@ await openDatabase(
 
 ---
 
-### Slide 24 — CRUD Operations
+### Slide 25 — CRUD Operations
 
 **Save a document:**
 ```typescript
@@ -737,7 +761,7 @@ await saveDocument("_default.conversations", id, { _deleted: true });
 
 ---
 
-### Slide 25 — N1QL Queries
+### Slide 26 — N1QL Queries
 
 N1QL is SQL for JSON documents. The `META().id` function returns the document ID.
 
@@ -780,7 +804,7 @@ await executeQuery("N1QL",
 
 ---
 
-### Slide 26 — Storing Embeddings
+### Slide 27 — Storing Embeddings
 
 Embeddings are stored as JSON arrays directly on the document:
 
@@ -814,9 +838,9 @@ function cosineSimilarity(a: Float32Array, b: Float32Array): number {
 
 ---
 
-## Part 6 — RAG with Vector Search (Slides 27–31)
+## Part 6 — RAG with Vector Search (Slides 28–32)
 
-### Slide 27 — Ingesting a Document
+### Slide 28 — Ingesting a Document
 
 The ingest pipeline: text → chunks → embeddings → database.
 
@@ -856,7 +880,7 @@ Overlap = 64 tokens ensures context isn't lost at chunk boundaries.
 
 ---
 
-### Slide 28 — The Embedding Pipeline
+### Slide 29 — The Embedding Pipeline
 
 Three backends, selected automatically:
 
@@ -889,7 +913,7 @@ text ──────────────► bagOfWords(text)             
 
 ---
 
-### Slide 29 — Retrieval: From Query to Context
+### Slide 30 — Retrieval: From Query to Context
 
 ```typescript
 // src/lib/rag.ts
@@ -926,7 +950,7 @@ export async function retrieveTopK(
 
 ---
 
-### Slide 30 — Injecting Context into the Prompt
+### Slide 31 — Injecting Context into the Prompt
 
 ```typescript
 // src/lib/llm.ts (simplified)
@@ -963,7 +987,7 @@ const truncated = truncateHistory(messages, inputBudget);
 
 ---
 
-### Slide 31 — Demo: Ingest a PDF and Query It
+### Slide 32 — Demo: Ingest a PDF and Query It
 
 **Step 1 — Ingest:**
 1. Open the Knowledge panel
@@ -998,9 +1022,9 @@ User: What are the main conclusions of the document?
 
 ---
 
-## Part 7 — Tools (Slides 32–35)
+## Part 7 — Tools (Slides 33–36)
 
-### Slide 32 — Tool Architecture
+### Slide 33 — Tool Architecture
 
 Tools are plain TypeScript objects with a schema and an `execute` function:
 
@@ -1031,7 +1055,7 @@ export interface Tool {
 
 ---
 
-### Slide 33 — A Safe Math Evaluator
+### Slide 34 — A Safe Math Evaluator
 
 The `calculator` tool uses a recursive descent parser — no `eval()`.
 
@@ -1073,7 +1097,7 @@ The recursive descent parser only accepts numbers, operators, and whitelisted `M
 
 ---
 
-### Slide 34 — Tool Call Parsing
+### Slide 35 — Tool Call Parsing
 
 The LLM emits tool calls as XML embedded in its response:
 
@@ -1108,7 +1132,7 @@ LLMs are more reliable at generating well-formed XML tags than JSON embedded in 
 
 ---
 
-### Slide 35 — Demo: Calculator + Wikipedia
+### Slide 36 — Demo: Calculator + Wikipedia
 
 **Enable tools** in the chat settings, then ask:
 
@@ -1139,9 +1163,9 @@ LLM: The square root of France's population (~68.4 million) is approximately 8,2
 
 ---
 
-## Part 8 — Agents & Router (Slides 36–40)
+## Part 8 — Agents & Router (Slides 37–41)
 
-### Slide 36 — What is an Agent?
+### Slide 37 — What is an Agent?
 
 In this app, an agent is a named persona with:
 - A **system prompt** (personality, constraints, tone)
@@ -1173,7 +1197,7 @@ export interface Agent {
 
 ---
 
-### Slide 37 — The Router in Detail
+### Slide 38 — The Router in Detail
 
 ```typescript
 // src/lib/llm.ts (simplified)
@@ -1211,7 +1235,7 @@ User message: "${userMessage}"`;
 
 ---
 
-### Slide 38 — Full Message Flow
+### Slide 39 — Full Message Flow
 
 ```
 User sends message
@@ -1256,7 +1280,7 @@ User sends message
 
 ---
 
-### Slide 39 — Creating a Custom Agent
+### Slide 40 — Creating a Custom Agent
 
 **Via the UI:**
 1. Open the Agents panel
@@ -1287,7 +1311,7 @@ await saveAgent({
 
 ---
 
-### Slide 40 — Demo: Multi-Agent Routing
+### Slide 41 — Demo: Multi-Agent Routing
 
 **Setup:** Create two agents:
 - **Chef**: "You are a professional chef. Answer only questions about cooking and recipes."
@@ -1313,9 +1337,9 @@ await saveAgent({
 
 ---
 
-## Part 9 — Conclusion & Limits (Slides 41–43)
+## Part 9 — Conclusion & Limits (Slides 42–44)
 
-### Slide 41 — What We Built
+### Slide 42 — What We Built
 
 A fully offline AI desktop app with:
 
@@ -1338,7 +1362,7 @@ A fully offline AI desktop app with:
 
 ---
 
-### Slide 42 — Known Limits & Trade-offs
+### Slide 43 — Known Limits & Trade-offs
 
 **Performance:**
 - 1B model: ~30 tok/s CPU, ~130 tok/s GPU. Adequate for chat, slow for batch processing.
@@ -1361,7 +1385,7 @@ A fully offline AI desktop app with:
 
 ---
 
-### Slide 43 — Resources & Next Steps
+### Slide 44 — Resources & Next Steps
 
 **This repository:**
 ```
