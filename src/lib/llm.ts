@@ -469,6 +469,7 @@ export async function generateStream(
     // We scan a sliding window of (pending + chunk) so tags split across
     // chunk boundaries are handled correctly.
     let inToolCall = false;
+    let currentCloseTag = ""; // closing tag matching the current open tag
     let toolCallPending = ""; // partial tag accumulator
     const iterStart = performance.now();
     const iterError = await new Promise<string | null>((resolve) => {
@@ -489,31 +490,49 @@ export async function generateStream(
             // tags split across network chunks are handled correctly.
             toolCallPending += chunk;
             let visible = "";
+            // Opening tags for both formats; closing tags matched per format.
+            const OPEN_TAGS = ["<tool_call>", "<|tool_call>"] as const;
+            const CLOSE_TAG: Record<string, string> = {
+              "<tool_call>": "</tool_call>",
+              "<|tool_call>": "<tool_call|>",
+            };
             while (toolCallPending.length > 0) {
               if (!inToolCall) {
-                const start = toolCallPending.indexOf("<tool_call>");
-                if (start === -1) {
+                // Find the earliest opening tag from either format.
+                let earliest = -1;
+                let openTag = "";
+                for (const tag of OPEN_TAGS) {
+                  const idx = toolCallPending.indexOf(tag);
+                  if (idx !== -1 && (earliest === -1 || idx < earliest)) {
+                    earliest = idx;
+                    openTag = tag;
+                  }
+                }
+                if (earliest === -1) {
                   // No tag — everything is visible, but keep a suffix in case
                   // a tag starts at the very end of this chunk.
-                  const safe = toolCallPending.length > 11
-                    ? toolCallPending.length - 11
+                  const maxSuffix = Math.max(...OPEN_TAGS.map((t) => t.length));
+                  const safe = toolCallPending.length > maxSuffix
+                    ? toolCallPending.length - maxSuffix
                     : 0;
                   visible += toolCallPending.slice(0, safe);
                   toolCallPending = toolCallPending.slice(safe);
                   break;
                 }
-                // Emit text before the tag, then enter suppression mode
-                visible += toolCallPending.slice(0, start);
-                toolCallPending = toolCallPending.slice(start + "<tool_call>".length);
+                // Emit text before the tag, then enter suppression mode.
+                visible += toolCallPending.slice(0, earliest);
+                toolCallPending = toolCallPending.slice(earliest + openTag.length);
                 inToolCall = true;
+                currentCloseTag = CLOSE_TAG[openTag];
               } else {
-                const end = toolCallPending.indexOf("</tool_call>");
+                const end = toolCallPending.indexOf(currentCloseTag);
                 if (end === -1) {
                   toolCallPending = ""; // still inside tag — discard
                   break;
                 }
-                toolCallPending = toolCallPending.slice(end + "</tool_call>".length);
+                toolCallPending = toolCallPending.slice(end + currentCloseTag.length);
                 inToolCall = false;
+                currentCloseTag = "";
               }
             }
             if (visible) {

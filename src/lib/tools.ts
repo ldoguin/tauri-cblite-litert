@@ -801,10 +801,44 @@ const TOOL_CALL_RE = /<tool_call>\s*([\s\S]*?)\s*<\/tool_call>/g;
 // Non-global regex for hasToolCall — avoids shared lastIndex state entirely.
 const TOOL_CALL_RE_TEST = /<tool_call>/;
 
-/** Extracts all <tool_call> blocks from a model response. */
+// Gemma4 native tool call format: <|tool_call>call:name{key:<|"|>val<|"|>}<tool_call|>
+// The model ignores system-prompt instructions to use <tool_call> and emits its
+// fine-tuned format instead. We parse both formats.
+const GEMMA_TOOL_CALL_RE = /<\|tool_call>call:([\w-]+)\{([\s\S]*?)\}<tool_call\|>/g;
+const GEMMA_TOOL_CALL_RE_TEST = /<\|tool_call>/;
+
+/**
+ * Parse Gemma4's native tool call format into a standard args object.
+ * Format: call:name{key:<|"|>value<|"|>, key2:<|"|>value2<|"|>}
+ * The <|"|> tokens are Gemma4's string-quoting special tokens.
+ */
+function parseGemmaArgs(argsStr: string): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+  // Match key:<|"|>value<|"|> pairs (string values)
+  const stringRe = /([\w_]+):<\|"\|>([\s\S]*?)<\|"\|>/g;
+  let m: RegExpExecArray | null;
+  while ((m = stringRe.exec(argsStr)) !== null) {
+    args[m[1]] = m[2];
+  }
+  // Match key:number pairs (unquoted numeric values)
+  const numRe = /([\w_]+):(-?\d+(?:\.\d+)?)/g;
+  while ((m = numRe.exec(argsStr)) !== null) {
+    if (!(m[1] in args)) args[m[1]] = Number(m[2]);
+  }
+  // Match key:true/false pairs
+  const boolRe = /([\w_]+):(true|false)/g;
+  while ((m = boolRe.exec(argsStr)) !== null) {
+    if (!(m[1] in args)) args[m[1]] = m[2] === "true";
+  }
+  return args;
+}
+
+/** Extracts all <tool_call> blocks from a model response (both standard and Gemma4 format). */
 export function parseToolCalls(text: string): ToolCall[] {
   const calls: ToolCall[] = [];
   let match: RegExpExecArray | null;
+
+  // Standard format: <tool_call>{"tool": "name", "args": {...}}</tool_call>
   TOOL_CALL_RE.lastIndex = 0;
   while ((match = TOOL_CALL_RE.exec(text)) !== null) {
     try {
@@ -812,12 +846,21 @@ export function parseToolCalls(text: string): ToolCall[] {
       if (parsed.tool) calls.push({ tool: parsed.tool, args: parsed.args ?? {} });
     } catch { /* skip malformed blocks */ }
   }
+
+  // Gemma4 native format: <|tool_call>call:name{...}<tool_call|>
+  GEMMA_TOOL_CALL_RE.lastIndex = 0;
+  while ((match = GEMMA_TOOL_CALL_RE.exec(text)) !== null) {
+    const tool = match[1];
+    const args = parseGemmaArgs(match[2]);
+    calls.push({ tool, args });
+  }
+
   return calls;
 }
 
-/** Returns true if the text contains at least one <tool_call> block. */
+/** Returns true if the text contains at least one tool call block (either format). */
 export function hasToolCall(text: string): boolean {
-  return TOOL_CALL_RE_TEST.test(text);
+  return TOOL_CALL_RE_TEST.test(text) || GEMMA_TOOL_CALL_RE_TEST.test(text);
 }
 
 // ── Execution ──────────────────────────────────────────────────────────────
