@@ -29,18 +29,17 @@ fn main() {
 fn macos_fixups() {
     // libLiteRtLmC.dylib — litert-lm-sys has `links = "LiteRtLm"` so its
     // cargo:lib_dir becomes DEP_LITERTLM_LIB_DIR for direct dependents.
-    // We add litert-lm-sys as a direct dep in Cargo.toml so this is set.
-    // Also check the re-export from litertlm (DEP_LITERTLM_LIB_DIR via cargo:lib_dir)
-    // in case the direct dep path isn't available.
     println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LIB_DIR");
-    if let Ok(dir) = std::env::var("DEP_LITERTLM_LIB_DIR") {
+    let lm_dir = std::env::var("DEP_LITERTLM_LIB_DIR").ok();
+    if let Some(ref dir) = lm_dir {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
     }
 
-    // libLiteRt.dylib + accelerators — litert-sys has `links = "LiteRt"` so
-    // its cargo:lib_dir becomes DEP_LITERT_LIB_DIR for direct dependents.
+    // libLiteRt.dylib + accelerator/sampler plugins — litert-sys has
+    // `links = "LiteRt"` so its cargo:lib_dir becomes DEP_LITERT_LIB_DIR.
     println!("cargo:rerun-if-env-changed=DEP_LITERT_LIB_DIR");
-    if let Ok(dir) = std::env::var("DEP_LITERT_LIB_DIR") {
+    let litert_dir = std::env::var("DEP_LITERT_LIB_DIR").ok();
+    if let Some(ref dir) = litert_dir {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
     }
 
@@ -48,6 +47,32 @@ fn macos_fixups() {
     println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LITERT_LIB_DIR");
     if let Ok(dir) = std::env::var("DEP_LITERTLM_LITERT_LIB_DIR") {
         println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+    }
+
+    // The LiteRT-LM engine finds sampler/accelerator plugins via dlopen()
+    // relative to libLiteRtLmC.dylib's directory. litert-sys downloads them
+    // to a separate cache dir, so they're not found at runtime.
+    // Copy them into the same directory as libLiteRtLmC.dylib so dlopen works.
+    if let (Some(lm), Some(litert)) = (lm_dir, litert_dir) {
+        let lm_path = std::path::Path::new(&lm);
+        let litert_path = std::path::Path::new(&litert);
+        if lm_path != litert_path {
+            let plugins = [
+                "libLiteRtTopKWebGpuSampler.dylib",
+                "libLiteRtWebGpuAccelerator.dylib",
+                "libLiteRtMetalAccelerator.dylib",
+                "libGemmaModelConstraintProvider.dylib",
+            ];
+            for plugin in &plugins {
+                let src = litert_path.join(plugin);
+                let dst = lm_path.join(plugin);
+                if src.exists() && !dst.exists() {
+                    if let Err(e) = std::fs::copy(&src, &dst) {
+                        println!("cargo:warning=Failed to copy {plugin} to lm dir: {e}");
+                    }
+                }
+            }
+        }
     }
 }
 
