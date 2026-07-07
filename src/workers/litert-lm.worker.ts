@@ -32,6 +32,10 @@ export interface ChatMessage {
 
 // ── State ─────────────────────────────────────────────────────────────────────
 
+// loadLiteRtLm() initialises a global WASM singleton — calling it twice throws.
+// Track whether it has been called so subsequent load messages skip it.
+let _wasmInitialised = false;
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 let engine: Engine | null = null;
 // Reuse a single conversation to avoid re-initializing GPU on every turn.
@@ -65,7 +69,12 @@ self.onmessage = async (event: MessageEvent) => {
         // run inside a Blob worker (blob: origin) where relative paths fail.
         const wasmBase = (self as unknown as { _wasmBase?: string })._wasmBase
           ?? (location.origin + "/litert-lm/");
-        await loadLiteRtLm(wasmBase);
+        // loadLiteRtLm() sets a global WASM singleton and throws if called
+        // twice — guard so reloading a model in the same worker session works.
+        if (!_wasmInitialised) {
+          await loadLiteRtLm(wasmBase);
+          _wasmInitialised = true;
+        }
 
         const modelUrl = msg.modelUrl as string;
         const maxTokens = (msg.maxTokens as number | undefined) ?? 2048;
