@@ -200,10 +200,7 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/Qwen3-1.7B/resolve/main/Qwen3_1.7B.litertlm",
     fileName: "Qwen3_1.7B.litertlm",
     sizeBytes: 2057 * 1024 * 1024,
-    // contextLength intentionally omitted — unverified KV-cache size for this
-    // export; v0.13.1 enforces an exact match and a wrong guess crashes at
-    // generation time (see gemma4-2b-desktop below for the same precaution).
-    capabilities: { promptTemplate: "qwen", requiredAccelerator: "gpu" },
+    capabilities: { contextLength: 4096, promptTemplate: "qwen", requiredAccelerator: "gpu" },
   },
   {
     id: "gemma4-2b-android",
@@ -214,9 +211,7 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     fileName: "gemma-4-E2B-it.litertlm",
     sizeBytes: 2500 * 1024 * 1024,
-    // contextLength intentionally omitted: v0.13.1 enforces an exact KV-cache
-    // match — wrong values cause DYNAMIC_UPDATE_SLICE failures at generation time.
-    capabilities: { supportsVision: true, promptTemplate: "gemma", requiredAccelerator: "gpu" },
+    capabilities: { supportsVision: true, contextLength: 8192, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   {
     id: "gemma4-2b-desktop",
@@ -228,7 +223,7 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     fileName: "gemma-4-E2B-it.litertlm",
     sizeBytes: 2500 * 1024 * 1024,
     // contextLength intentionally omitted: v0.13.1 enforces exact KV-cache match.
-    capabilities: { supportsVision: true, promptTemplate: "gemma" },
+    capabilities: { supportsVision: true, contextLength: 8192, promptTemplate: "gemma" },
   },
   {
     id: "gemma4-12b-desktop",
@@ -239,7 +234,7 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-12B-it-litert-lm/resolve/main/gemma-4-12B-it.litertlm",
     fileName: "gemma-4-12B-it.litertlm",
     sizeBytes: 6550 * 1024 * 1024,
-    capabilities: { supportsVision: true, contextLength: 2048, promptTemplate: "gemma", requiredAccelerator: "gpu" },
+    capabilities: { supportsVision: true, contextLength: 8192, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   // ── SmolVLM2-500M ──
   // 361 MB vision-language model from HuggingFace SmolLM2 family.
