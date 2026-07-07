@@ -22,6 +22,7 @@ import {
 import type { ModelConfig } from "./types";
 import {
   resolveModelCapabilities,
+  findCatalogueEntry,
   type AppPlatform,
   type ScannedModelMeta,
 } from "./modelCache";
@@ -186,6 +187,7 @@ export async function loadModels(
         // than omitting (which lets the engine default to 2048, too small for
         // most conversations).
         maxTokens: caps.contextLength || 4096,
+        prefillChunkSize: findCatalogueEntry(config.lmModelPath)?.prefillChunkSize,
         vision: caps.supportsVision,
         cacheDir,
       });
@@ -253,11 +255,13 @@ export async function loadLmFromPath(
     } catch { /* leave as-is */ }
   }
 
+  const entry = findCatalogueEntry(modelPath);
   await loadLmModel({
     modelId: LM_MODEL_ID,
     modelPath,
     accelerator,
     maxTokens: caps.contextLength || 4096,
+    prefillChunkSize: entry?.prefillChunkSize,
     vision: caps.supportsVision,
     cacheDir,
   });

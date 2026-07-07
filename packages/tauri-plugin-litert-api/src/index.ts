@@ -73,6 +73,9 @@ export interface LoadLmModelOptions {
   modelId: string;
   accelerator?: Accelerator;
   maxTokens?: number;
+  /** Tokens per GPU dispatch during prefill. Smaller values avoid Metal's
+   *  30s command-buffer timeout on large prompts. Omit to use engine default. */
+  prefillChunkSize?: number;
   cacheDir?: string;
   /** Enable vision (multimodal) backend for models like Gemma 4 E2B/E4B. */
   vision?: boolean;

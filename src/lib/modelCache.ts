@@ -84,6 +84,12 @@ export type ModelEntry = {
    * kTfLitePrefillDecode .litertlm files like Qwen3).
    */
   wasmStreaming?: boolean;
+  /**
+   * Tokens per GPU dispatch during prefill. Passed to the native engine as
+   * prefill_chunk_size. Smaller values avoid Metal's 30s command-buffer timeout
+   * on large prompts. Omit to use the engine's built-in default.
+   */
+  prefillChunkSize?: number;
   /** Default capabilities applied on all platforms */
   capabilities?: ModelCapabilities;
   /**
@@ -222,10 +228,11 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     fileName: "gemma-4-E2B-it.litertlm",
     sizeBytes: 2500 * 1024 * 1024,
-    // contextLength capped at 2048: the Metal GPU delegate has a 30s command-buffer
-    // timeout per decode step. With max_num_tokens=8192 the KV-cache read per step
-    // exceeds that limit on M1 Pro. 2048 keeps each step well within the budget.
-    capabilities: { supportsVision: true, contextLength: 2048, promptTemplate: "gemma", requiredAccelerator: "gpu" },
+    // prefillChunkSize: Metal's command-buffer timeout is 30s per dispatch.
+    // Chunking prefill into 512-token batches keeps each dispatch fast enough
+    // to avoid the timeout on large prompts.
+    prefillChunkSize: 512,
+    capabilities: { supportsVision: true, contextLength: 4096, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   {
     id: "gemma4-12b-desktop",
@@ -236,7 +243,8 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-12B-it-litert-lm/resolve/main/gemma-4-12B-it.litertlm",
     fileName: "gemma-4-12B-it.litertlm",
     sizeBytes: 6550 * 1024 * 1024,
-    capabilities: { supportsVision: true, contextLength: 2048, promptTemplate: "gemma", requiredAccelerator: "gpu" },
+    prefillChunkSize: 512,
+    capabilities: { supportsVision: true, contextLength: 4096, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   // ── SmolVLM2-500M ──
   // 361 MB vision-language model from HuggingFace SmolLM2 family.
@@ -379,6 +387,14 @@ const CAPABILITY_DEFAULTS: Required<ModelCapabilities> = {
  * @param platform   Current runtime platform
  * @param scanned    Scanned model list (may contain sidecar metadata)
  */
+/** Returns the catalogue entry whose fileName/url suffix matches `modelPath`, or undefined. */
+export function findCatalogueEntry(modelPath: string): ModelEntry | undefined {
+  return MODEL_CATALOGUE.find((m) => {
+    const fn = m.fileName ?? m.url.split("/").pop() ?? "";
+    return fn && modelPath.endsWith(fn);
+  });
+}
+
 export function resolveModelCapabilities(
   modelPath: string,
   platform: AppPlatform,
