@@ -1,0 +1,16 @@
+{
+  "app": {
+    "windows": [
+      {
+        "title": "Offline RAG Chatbot",
+        "width": 1100,
+        "height": 780,
+        "minWidth": 600,
+        "minHeight": 500,
+        "resizable": true,
+        "fullscreen": false,
+        "additionalBrowserArgs": "--js-flags=--max-old-space-size=8192 --enable-features=SharedArrayBuffer --disable-features=RendererCodeIntegrity"
+      }
+    ]
+  }
+}
