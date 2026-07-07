@@ -26,12 +26,12 @@ serde_json = "1"
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
 tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "1f2b3bb3a85bb613b3c1127352b74a68b02806e5", features = ["native-cbl"] }
-tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "6ae9f40" }
+tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "57557ca" }
 # Direct dep on litert-lm-sys so its DEP_LITERTLM_LIB_DIR is propagated to
 # our build.rs — needed to emit the correct macOS rpath for libLiteRtLmC.dylib.
 # Without this, litertlm (no `links` key) cannot forward the variable.
-litert-lm-sys = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "6ae9f40" }
-litert-sys     = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "6ae9f40" }
+litert-lm-sys = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "57557ca" }
+litert-sys     = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "57557ca" }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -42,8 +42,8 @@ base64 = "0.22"
 
 [dev-dependencies]
 # Direct access to the LiteRT backends for integration tests in tests/
-litert   = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "6ae9f40" }
-litertlm = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "6ae9f40" }
+litert   = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "57557ca" }
+litertlm = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "57557ca" }
 
 
 [profile.release]
@@ -71,3 +71,5 @@ path = "examples/gpu_crash_test.rs"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = "2.0"
+
+
