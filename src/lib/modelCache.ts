@@ -228,7 +228,9 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     fileName: "gemma-4-E2B-it.litertlm",
     sizeBytes: 2500 * 1024 * 1024,
-    capabilities: { supportsVision: true, contextLength: 4096, promptTemplate: "gemma", requiredAccelerator: "gpu" },
+    // contextLength 2048: Metal enforces a 30s command-buffer timeout per GPU
+    // dispatch. Larger context windows cause the decode step to exceed this limit.
+    capabilities: { supportsVision: true, contextLength: 2048, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   {
     id: "gemma4-12b-desktop",
@@ -239,7 +241,7 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-12B-it-litert-lm/resolve/main/gemma-4-12B-it.litertlm",
     fileName: "gemma-4-12B-it.litertlm",
     sizeBytes: 6550 * 1024 * 1024,
-    capabilities: { supportsVision: true, contextLength: 4096, promptTemplate: "gemma", requiredAccelerator: "gpu" },
+    capabilities: { supportsVision: true, contextLength: 2048, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   // ── SmolVLM2-500M ──
   // 361 MB vision-language model from HuggingFace SmolLM2 family.

@@ -958,6 +958,7 @@ function truncateToFitTokens(
   contextWindow: number,
 ): Array<{ role: string; content: string }> {
   const CHARS_PER_TOKEN = 3; // conservative: BPE English averages ~3 chars/token
+  // Reserve 30% for the model's output; the remaining 70% is the input budget.
   const maxInputTokens = Math.floor(contextWindow * 0.70);
   const maxInputChars = maxInputTokens * CHARS_PER_TOKEN;
 
@@ -972,16 +973,33 @@ function truncateToFitTokens(
     return m;
   });
 
-  const promptLen = (msgs: Array<{ role: string; content: string }>) =>
+  // The system prompt is prepended directly to the conversation text (see
+  // generateViaTauri), so it must be counted in the budget. If the system
+  // prompt alone exceeds the budget, truncate it to leave room for at least
+  // the last user message.
+  const systemChars = system[0]?.content.length ?? 0;
+  const systemOverhead = systemChars + "\n\n".length;
+
+  const historyLen = (msgs: Array<{ role: string; content: string }>) =>
     msgs.map((m) => `${m.role === "user" ? "User" : "Assistant"}: ${m.content}`).join("\n").length +
     "\nAssistant:".length;
 
-  // Drop from the front (oldest turns) until it fits, keeping at least the last message.
-  while (history.length > 1 && promptLen(history) + (system[0]?.content.length ?? 0) > maxInputChars) {
+  // If the system prompt alone fills the budget, truncate it.
+  let effectiveSystem = system;
+  if (systemOverhead > maxInputChars && system[0]) {
+    const allowedSystemChars = Math.max(0, maxInputChars - "\n\n".length - 200); // 200 chars min for history
+    effectiveSystem = [{ ...system[0], content: system[0].content.slice(0, allowedSystemChars) + "\n…[truncated]" }];
+  }
+
+  const effectiveSystemChars = (effectiveSystem[0]?.content.length ?? 0) + "\n\n".length;
+  const historyBudget = maxInputChars - effectiveSystemChars;
+
+  // Drop from the front (oldest turns) until history fits, keeping at least the last message.
+  while (history.length > 1 && historyLen(history) > historyBudget) {
     history = history.slice(1);
   }
 
-  return [...system, ...history];
+  return [...effectiveSystem, ...history];
 }
 
 function buildMessages(
