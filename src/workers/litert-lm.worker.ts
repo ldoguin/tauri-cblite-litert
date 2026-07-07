@@ -145,20 +145,9 @@ self.onmessage = async (event: MessageEvent) => {
           },
         });
 
-        // Warm up: create a conversation now so GPU shader compilation happens
-        // during load (progress 92–100) rather than on the first user message.
-        post({ type: "load-progress", progress: 95 });
-        conversation = await engine.createConversation({
-          preface: { messages: [] },
-          // Prefill the (empty) preface KV cache immediately to warm up shaders.
-          prefillPrefaceOnInit: true,
-          sessionConfig: {
-            // Greedy sampling — fastest, no top-k/top-p overhead.
-            samplerParams: { type: 3 /* SamplerType.GREEDY */ },
-            // Cap output to avoid runaway generation.
-            maxOutputTokens: 1024,
-          },
-        });
+        // Skip warmup on CPU — prefillPrefaceOnInit runs a full prefill pass
+        // which blocks for minutes on CPU and serves no purpose (no GPU shaders
+        // to compile). Conversation is created lazily on first generate() call.
         conversationSystemPrompt = undefined;
 
         post({ type: "load-progress", progress: 100 });
