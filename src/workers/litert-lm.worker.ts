@@ -195,7 +195,9 @@ self.onmessage = async (event: MessageEvent) => {
           if (conversation) await conversation.delete().catch(() => {});
           const config: ConversationConfig = {
             preface: { messages: prefaceMessages },
-            prefillPrefaceOnInit: true,
+            // prefillPrefaceOnInit: false — on CPU this blocks for minutes with
+            // no benefit. Preface is applied at generation time instead.
+            prefillPrefaceOnInit: false,
             sessionConfig: {
               samplerParams: { type: 3 /* SamplerType.GREEDY */ },
               maxOutputTokens: 1024,
