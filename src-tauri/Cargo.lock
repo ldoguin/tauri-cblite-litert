@@ -1993,7 +1993,7 @@ checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
 [[package]]
 name = "litert"
 version = "0.2.1"
-source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=6ae9f40#6ae9f40e84a4ee6270adbf7aded4be980e6b1135"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=ee79aed#ee79aed886a0ea6e9ca53e05d5e1f86a22b57422"
 dependencies = [
  "libloading 0.8.9",
  "litert-sys",
@@ -2003,7 +2003,7 @@ dependencies = [
 [[package]]
 name = "litert-lm-sys"
 version = "0.2.1"
-source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=6ae9f40#6ae9f40e84a4ee6270adbf7aded4be980e6b1135"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=ee79aed#ee79aed886a0ea6e9ca53e05d5e1f86a22b57422"
 dependencies = [
  "dirs 5.0.1",
  "flate2",
@@ -2018,7 +2018,7 @@ dependencies = [
 [[package]]
 name = "litert-sys"
 version = "0.2.1"
-source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=6ae9f40#6ae9f40e84a4ee6270adbf7aded4be980e6b1135"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=ee79aed#ee79aed886a0ea6e9ca53e05d5e1f86a22b57422"
 dependencies = [
  "dirs 5.0.1",
  "serde",
@@ -2031,7 +2031,7 @@ dependencies = [
 [[package]]
 name = "litertlm"
 version = "0.2.1"
-source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=6ae9f40#6ae9f40e84a4ee6270adbf7aded4be980e6b1135"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=ee79aed#ee79aed886a0ea6e9ca53e05d5e1f86a22b57422"
 dependencies = [
  "litert-lm-sys",
  "litert-sys",
@@ -3767,6 +3767,8 @@ dependencies = [
  "futures-util",
  "hex",
  "litert",
+ "litert-lm-sys",
+ "litert-sys",
  "litertlm",
  "reqwest 0.12.28",
  "serde",
@@ -3856,7 +3858,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-litert"
 version = "0.1.0"
-source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=6ae9f40#6ae9f40e84a4ee6270adbf7aded4be980e6b1135"
+source = "git+https://github.com/ldoguin/tauri-plugin-litert?rev=ee79aed#ee79aed886a0ea6e9ca53e05d5e1f86a22b57422"
 dependencies = [
  "litert",
  "litertlm",
