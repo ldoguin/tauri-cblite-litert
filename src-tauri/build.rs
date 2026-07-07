@@ -27,16 +27,24 @@ fn main() {
 //   cargo:lib_dir        → DEP_LITERTLM_LIB_DIR      (LM dylib dir)
 //   cargo:litert_lib_dir → DEP_LITERTLM_LITERT_LIB_DIR (base LiteRt dir)
 fn macos_fixups() {
-    // libLiteRtLmC.dylib — re-exported by litertlm's build.rs as cargo:lib_dir
+    // libLiteRtLmC.dylib — re-exported by litertlm's build.rs as cargo:lib_dir.
+    // Fall back to DEP_LITERTLM_SYS_LIB_DIR (direct from litert-lm-sys via its
+    // `links = "LiteRtLm"` key) in case litertlm's re-export isn't propagated.
     println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LIB_DIR");
-    if let Ok(dir) = std::env::var("DEP_LITERTLM_LIB_DIR") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+    println!("cargo:rerun-if-env-changed=DEP_LITERTLM_SYS_LIB_DIR");
+    for var in &["DEP_LITERTLM_LIB_DIR", "DEP_LITERTLM_SYS_LIB_DIR"] {
+        if let Ok(dir) = std::env::var(var) {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+        }
     }
 
-    // libLiteRt.dylib + accelerators — re-exported by litertlm as cargo:litert_lib_dir
+    // libLiteRt.dylib + accelerators — re-exported by litertlm as cargo:litert_lib_dir.
     println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LITERT_LIB_DIR");
-    if let Ok(dir) = std::env::var("DEP_LITERTLM_LITERT_LIB_DIR") {
-        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+    println!("cargo:rerun-if-env-changed=DEP_LITERT_LIB_DIR");
+    for var in &["DEP_LITERTLM_LITERT_LIB_DIR", "DEP_LITERT_LIB_DIR"] {
+        if let Ok(dir) = std::env::var(var) {
+            println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+        }
     }
 }
 

@@ -101,6 +101,21 @@ pnpm tauri android dev
 pnpm dev
 ```
 
+#### macOS: `dyld: Library not loaded: @rpath/libLiteRtLmC.dylib`
+
+The build script downloads `libLiteRtLmC.dylib` from GitHub on first build. If it fails or the cache is stale:
+
+```bash
+# Option 1 — force re-download by clearing the Cargo build cache
+cd src-tauri && cargo clean && cd .. && pnpm tauri dev
+
+# Option 2 — download manually and point the build at it
+curl -L -o /tmp/libLiteRtLmC.dylib \
+  https://github.com/offbit-ai/LiteRT/releases/download/litert-lm-v0.10.2/libLiteRtLmC.dylib
+export LITERT_LM_LIB_DIR=/tmp
+pnpm tauri dev
+```
+
 ---
 
 ## CouchbaseLite collections
