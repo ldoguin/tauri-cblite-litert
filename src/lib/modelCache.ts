@@ -216,13 +216,16 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
   {
     id: "gemma4-2b-desktop",
     label: "Gemma 4 2B (desktop)",
-    description: "Gemma 4 E2B INT4 — ~2.5 GB, on-device via LiteRT-LM (GPU via WebGPU/RADV)",
+    description: "Gemma 4 E2B INT4 — ~2.5 GB, on-device via LiteRT-LM (GPU via Metal/WebGPU)",
     kind: "llm",
     platform: "tauri",
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     fileName: "gemma-4-E2B-it.litertlm",
     sizeBytes: 2500 * 1024 * 1024,
-    capabilities: { supportsVision: true, contextLength: 8192, promptTemplate: "gemma", requiredAccelerator: "gpu" },
+    // contextLength capped at 2048: the Metal GPU delegate has a 30s command-buffer
+    // timeout per decode step. With max_num_tokens=8192 the KV-cache read per step
+    // exceeds that limit on M1 Pro. 2048 keeps each step well within the budget.
+    capabilities: { supportsVision: true, contextLength: 2048, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   {
     id: "gemma4-12b-desktop",
@@ -233,7 +236,7 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-12B-it-litert-lm/resolve/main/gemma-4-12B-it.litertlm",
     fileName: "gemma-4-12B-it.litertlm",
     sizeBytes: 6550 * 1024 * 1024,
-    capabilities: { supportsVision: true, contextLength: 8192, promptTemplate: "gemma", requiredAccelerator: "gpu" },
+    capabilities: { supportsVision: true, contextLength: 2048, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   // ── SmolVLM2-500M ──
   // 361 MB vision-language model from HuggingFace SmolLM2 family.
