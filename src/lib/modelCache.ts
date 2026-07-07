@@ -228,10 +228,6 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     fileName: "gemma-4-E2B-it.litertlm",
     sizeBytes: 2500 * 1024 * 1024,
-    // prefillChunkSize: Metal's command-buffer timeout is 30s per dispatch.
-    // Chunking prefill into 512-token batches keeps each dispatch fast enough
-    // to avoid the timeout on large prompts.
-    prefillChunkSize: 512,
     capabilities: { supportsVision: true, contextLength: 4096, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   {
@@ -243,7 +239,6 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-12B-it-litert-lm/resolve/main/gemma-4-12B-it.litertlm",
     fileName: "gemma-4-12B-it.litertlm",
     sizeBytes: 6550 * 1024 * 1024,
-    prefillChunkSize: 512,
     capabilities: { supportsVision: true, contextLength: 4096, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   // ── SmolVLM2-500M ──
