@@ -204,7 +204,12 @@ export async function loadModels(
 
 export async function unloadModels(): Promise<void> {
   try { await unloadModel(EMBED_MODEL_ID); } catch { /* not loaded */ }
-  try { await unloadLmModel(LM_MODEL_ID); } catch { /* not loaded */ }
+  // On Windows the LM runs via WASM — skip the native unloadLmModel IPC call
+  // which would fail with "model not found" since it was never loaded natively.
+  const platform = await getAppPlatform();
+  if (platform !== "windows") {
+    try { await unloadLmModel(LM_MODEL_ID); } catch { /* not loaded */ }
+  }
   unloadWasmModel();
   setActiveLmModel(null);
 }

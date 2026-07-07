@@ -155,6 +155,9 @@ export function ModelManagerPanel({
     try {
       if (model.kind === "llm") {
         let urlOrPath = model.url;
+        // "windows" entries use the WASM engine with a cached local file —
+        // resolve the path the same way as other Tauri platforms.
+        // "web" entries stream from URL directly, no local path needed.
         if (isTauri() && model.platform !== "web") {
           const { invoke } = await import("@tauri-apps/api/core");
           const fileName = model.fileName ?? model.url.split("/").pop() ?? `${model.id}.bin`;
