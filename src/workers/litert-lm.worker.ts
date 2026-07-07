@@ -86,6 +86,7 @@ self.onmessage = async (event: MessageEvent) => {
 
         const contentLength = Number(response.headers.get("content-length") ?? 0);
         let loaded = 0;
+        let lastReported = -1;
         const reader = response.body!.getReader();
         const chunks: BlobPart[] = [];
 
@@ -94,8 +95,17 @@ self.onmessage = async (event: MessageEvent) => {
           if (done) break;
           chunks.push(value);
           loaded += value.byteLength;
+          let pct: number;
           if (contentLength > 0) {
-            post({ type: "load-progress", progress: Math.round((loaded / contentLength) * 90) });
+            pct = Math.round((loaded / contentLength) * 88);
+          } else {
+            // No Content-Length — show indeterminate progress based on bytes read.
+            // Asymptotically approaches 88% so the bar keeps moving.
+            pct = Math.round(88 * (1 - Math.exp(-loaded / (200 * 1024 * 1024))));
+          }
+          if (pct !== lastReported) {
+            post({ type: "load-progress", progress: pct });
+            lastReported = pct;
           }
         }
 
