@@ -222,8 +222,7 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it.litertlm",
     fileName: "gemma-4-E2B-it.litertlm",
     sizeBytes: 2500 * 1024 * 1024,
-    // contextLength intentionally omitted: v0.13.1 enforces exact KV-cache match.
-    capabilities: { supportsVision: true, contextLength: 8192, promptTemplate: "gemma" },
+    capabilities: { supportsVision: true, contextLength: 8192, promptTemplate: "gemma", requiredAccelerator: "gpu" },
   },
   {
     id: "gemma4-12b-desktop",
