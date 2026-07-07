@@ -99,9 +99,9 @@ self.onmessage = async (event: MessageEvent) => {
           if (contentLength > 0) {
             pct = Math.round((loaded / contentLength) * 88);
           } else {
-            // No Content-Length — show indeterminate progress based on bytes read.
-            // Asymptotically approaches 88% so the bar keeps moving.
-            pct = Math.round(88 * (1 - Math.exp(-loaded / (200 * 1024 * 1024))));
+            // No Content-Length — asymptotically approach 88% based on bytes read.
+            // Use 1 GB as the scale so the bar moves visibly for 500 MB–3 GB models.
+            pct = Math.round(88 * (1 - Math.exp(-loaded / (1024 * 1024 * 1024))));
           }
           if (pct !== lastReported) {
             post({ type: "load-progress", progress: pct });
@@ -117,13 +117,13 @@ self.onmessage = async (event: MessageEvent) => {
 
         const { Backend } = await import("@litert-lm/core");
 
-        // Use CPU backend: GPU_ARTISAN (the default) uses streaming model
-        // loading which throws "Streaming kTfLitePrefillDecode models is not
-        // supported yet" for standard .litertlm files. CPU uses VFS loading
-        // which supports all model types.
+        // GPU_ARTISAN uses streaming load — required for -web.litertlm files
+        // and memory-efficient (no VFS copy). Standard .litertlm files
+        // (kTfLitePrefillDecode, e.g. Qwen3) must use CPU+VFS instead.
+        const useStreaming = !!(msg.streaming as boolean | undefined);
         engine = await EngineClass.create({
           model: modelBlob,
-          backend: Backend.CPU,
+          backend: useStreaming ? Backend.GPU_ARTISAN : Backend.CPU,
           mainExecutorSettings: {
             maxNumTokens: maxTokens,
             advancedSettings: {

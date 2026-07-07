@@ -22,7 +22,10 @@ async function ensurePlatform(): Promise<AppPlatform> {
   if (!isTauri()) { _platform = "web"; return _platform; }
   try {
     const { platform } = await import("@tauri-apps/plugin-os");
-    _platform = (await platform()) === "android" ? "android" : "desktop";
+    const p = await platform();
+    if (p === "android") _platform = "android";
+    else if (p === "windows") _platform = "windows";
+    else _platform = "desktop";
   } catch {
     _platform = "desktop";
   }
@@ -72,8 +75,15 @@ export type ModelEntry = {
   /** Approximate size in bytes (shown before download) */
   sizeBytes: number;
   /** Restrict to a specific runtime — omit to show on all platforms.
-   * "android" = Android only, "tauri" = desktop only, "web" = browser only. */
-  platform?: "web" | "tauri" | "android";
+   * "android" = Android only, "tauri" = desktop only, "web" = browser only,
+   * "windows" = Windows Tauri only. */
+  platform?: "web" | "tauri" | "android" | "windows";
+  /**
+   * When true, the WASM engine uses GPU_ARTISAN streaming load (required for
+   * -web.litertlm files). When false/absent, uses CPU + VFS load (for standard
+   * kTfLitePrefillDecode .litertlm files like Qwen3).
+   */
+  wasmStreaming?: boolean;
   /** Default capabilities applied on all platforms */
   capabilities?: ModelCapabilities;
   /**
@@ -139,6 +149,35 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
     // requiredAccelerator intentionally omitted — defaults to CPU (works,
     // just slower); GPU is opt-in via the user's own accelerator setting.
     capabilities: { promptTemplate: "qwen" },
+  },
+  // ── LLMs (Windows — WASM engine via @litert-lm/core) ──
+  // Windows uses the WASM engine because LiteRtLmC.dll is unavailable.
+  // Only -web.litertlm files work: they use GPU_ARTISAN streaming load.
+  // Standard .litertlm files (kTfLitePrefillDecode) require CPU+VFS which
+  // buffers the entire model in WASM memory and OOMs WebView2.
+  {
+    id: "gemma4-2b-windows",
+    label: "Gemma 4 2B (Windows WASM)",
+    description: "Gemma 4 E2B — ~2.5 GB, runs via WebAssembly on Windows (GPU_ARTISAN streaming)",
+    kind: "llm",
+    platform: "windows",
+    wasmStreaming: true,
+    url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm",
+    fileName: "gemma-4-E2B-it-web.litertlm",
+    sizeBytes: 2500 * 1024 * 1024,
+    capabilities: { contextLength: 8192, promptTemplate: "gemma" },
+  },
+  {
+    id: "qwen3-0.6b-windows",
+    label: "Qwen3 0.6B (Windows WASM)",
+    description: "Qwen3 0.6B — ~586 MB, runs via WebAssembly on Windows (CPU backend)",
+    kind: "llm",
+    platform: "windows",
+    wasmStreaming: false,
+    url: "https://huggingface.co/litert-community/Qwen3-0.6B/resolve/main/Qwen3-0.6B.litertlm",
+    fileName: "Qwen3-0.6B.litertlm",
+    sizeBytes: 586 * 1024 * 1024,
+    capabilities: { contextLength: 4096, promptTemplate: "qwen" },
   },
   // ── LLMs (Android) ──
   // Same .litertlm binaries as desktop — the format is cross-platform.
@@ -321,10 +360,11 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
 function platformModels(): ModelEntry[] {
   const p = _platform ?? (isTauri() ? "desktop" : "web");
   return MODEL_CATALOGUE.filter((e) => {
-    if (!e.platform) return true;                // shown everywhere
+    if (!e.platform) return true;                  // shown everywhere
     if (e.platform === "android") return p === "android";
     if (e.platform === "tauri")   return p === "desktop";
     if (e.platform === "web")     return p === "web";
+    if (e.platform === "windows") return p === "windows";
     return false;
   });
 }

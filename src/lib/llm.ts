@@ -88,6 +88,11 @@ export { isTauri } from "./db";
 import { isTauri } from "./db";
 import { generateViaWasm, isWasmModelLoaded, loadWasmModel, unloadWasmModel } from "./llm-wasm";
 
+/** -web.litertlm files use GPU_ARTISAN streaming; standard files use CPU+VFS. */
+function isWebLitertlm(path: string): boolean {
+  return path.includes("-web.litertlm") || path.endsWith("-web.task");
+}
+
 export function getActiveBackend(): LlmBackend {
   if (isTauri() && activeLmModelId) return "tauri";
   if (webLlm) return "mediapipe";
@@ -118,7 +123,7 @@ export async function loadModels(
         const { convertFileSrc } = await import("@tauri-apps/api/core");
         const modelUrl = convertFileSrc(config.lmModelPath);
         const caps = resolveModelCapabilities(config.lmModelPath, platform, scanned);
-        await loadWasmModel(modelUrl, caps.contextLength || 2048);
+        await loadWasmModel(modelUrl, caps.contextLength || 2048, undefined, isWebLitertlm(config.lmModelPath));
         setActiveLmModel(LM_MODEL_ID);
         setActiveContextLength(caps.contextLength || 4096);
       } catch (err) {
@@ -215,9 +220,16 @@ export async function loadLmFromPath(
 
   // On Windows, LiteRtLmC.dll is not available — use the WASM engine instead.
   if (platform === "windows") {
+    if (!isWebLitertlm(modelPath)) {
+      console.warn(
+        "[llm] Windows WASM engine requires a -web.litertlm file. " +
+        "Standard .litertlm files (kTfLitePrefillDecode) use CPU+VFS which " +
+        "may OOM on large models. Use a -web.litertlm variant for best results.",
+      );
+    }
     const { convertFileSrc } = await import("@tauri-apps/api/core");
     const modelUrl = convertFileSrc(modelPath);
-    await loadWasmModel(modelUrl, caps.contextLength || 2048);
+    await loadWasmModel(modelUrl, caps.contextLength || 2048, undefined, isWebLitertlm(modelPath));
     setActiveLmModel(LM_MODEL_ID);
     setActiveContextLength(caps.contextLength || 4096);
     return;
@@ -260,7 +272,7 @@ export async function loadWasmFromUrl(
   maxTokens = 4096,
   onProgress?: (pct: number) => void,
 ): Promise<void> {
-  await loadWasmModel(modelUrl, maxTokens, onProgress);
+  await loadWasmModel(modelUrl, maxTokens, onProgress, isWebLitertlm(modelUrl));
   setActiveLmModel(LM_MODEL_ID);
   setActiveContextLength(maxTokens);
 }

@@ -68,11 +68,15 @@ export type WasmLoadProgress = (progress: number) => void;
  * Load a .litertlm model into the WASM engine.
  * modelUrl must be a URL accessible from the WebView (e.g. a Tauri asset
  * protocol URL or a local HTTP URL served by the dev server).
+ *
+ * streaming: true  → GPU_ARTISAN backend (required for -web.litertlm files)
+ * streaming: false → CPU backend (for standard kTfLitePrefillDecode files like Qwen3)
  */
 export async function loadWasmModel(
   modelUrl: string,
   maxTokens = 2048,
   onProgress?: WasmLoadProgress,
+  streaming = false,
 ): Promise<void> {
   if (_loadedModelUrl === modelUrl && _workerReady) return;
 
@@ -100,7 +104,7 @@ export async function loadWasmModel(
     };
 
     worker.addEventListener("message", handler);
-    worker.postMessage({ type: "load", modelUrl, maxTokens });
+    worker.postMessage({ type: "load", modelUrl, maxTokens, streaming });
   });
 }
 
