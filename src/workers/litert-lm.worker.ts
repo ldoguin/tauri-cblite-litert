@@ -89,19 +89,18 @@ self.onmessage = async (event: MessageEvent) => {
         if (conversation) { await conversation.delete().catch(() => {}); conversation = null; }
         if (engine) { await engine.delete(); engine = null; }
 
+        const { Backend } = await import("@litert-lm/core");
+
+        // Use CPU backend: GPU_ARTISAN (the default) uses streaming model
+        // loading which throws "Streaming kTfLitePrefillDecode models is not
+        // supported yet" for standard .litertlm files. CPU uses VFS loading
+        // which supports all model types.
         engine = await EngineClass.create({
           model: modelBlob,
+          backend: Backend.CPU,
           mainExecutorSettings: {
             maxNumTokens: maxTokens,
             advancedSettings: {
-              // Parallelise weight upload to GPU — speeds up load and first inference
-              num_threads_to_upload: 4,
-              num_threads_to_compile: 4,
-              // Already-optimal defaults kept explicit for clarity
-              convert_weights_on_gpu: true,
-              optimize_shader_compilation: true,
-              share_constant_tensors: true,
-              gpu_madvise_original_shared_tensors: true,
               // Required fields with their defaults
               prefill_batch_sizes: [],
               num_output_candidates: 1,
@@ -139,6 +138,8 @@ self.onmessage = async (event: MessageEvent) => {
         // sub-models (e.g. Gemma 4). Use a text-only model like Qwen3 instead.
         const friendly = msg.includes("kTfLiteEmbedder")
           ? "This model contains a vision/embedder sub-model not supported by the browser WASM runtime. Try Qwen3 0.6B or 1.7B instead."
+          : msg.includes("kTfLitePrefillDecode")
+          ? "This model format (kTfLitePrefillDecode) is not supported by the WASM runtime. Try Qwen3 0.6B or 1.7B instead."
           : msg;
         post({ type: "load-error", error: friendly });
       }
