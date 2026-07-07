@@ -27,24 +27,27 @@ fn main() {
 //   cargo:lib_dir        → DEP_LITERTLM_LIB_DIR      (LM dylib dir)
 //   cargo:litert_lib_dir → DEP_LITERTLM_LITERT_LIB_DIR (base LiteRt dir)
 fn macos_fixups() {
-    // libLiteRtLmC.dylib — re-exported by litertlm's build.rs as cargo:lib_dir.
-    // Fall back to DEP_LITERTLM_SYS_LIB_DIR (direct from litert-lm-sys via its
-    // `links = "LiteRtLm"` key) in case litertlm's re-export isn't propagated.
+    // libLiteRtLmC.dylib — litert-lm-sys has `links = "LiteRtLm"` so its
+    // cargo:lib_dir becomes DEP_LITERTLM_LIB_DIR for direct dependents.
+    // We add litert-lm-sys as a direct dep in Cargo.toml so this is set.
+    // Also check the re-export from litertlm (DEP_LITERTLM_LIB_DIR via cargo:lib_dir)
+    // in case the direct dep path isn't available.
     println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LIB_DIR");
-    println!("cargo:rerun-if-env-changed=DEP_LITERTLM_SYS_LIB_DIR");
-    for var in &["DEP_LITERTLM_LIB_DIR", "DEP_LITERTLM_SYS_LIB_DIR"] {
-        if let Ok(dir) = std::env::var(var) {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
-        }
+    if let Ok(dir) = std::env::var("DEP_LITERTLM_LIB_DIR") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
     }
 
-    // libLiteRt.dylib + accelerators — re-exported by litertlm as cargo:litert_lib_dir.
-    println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LITERT_LIB_DIR");
+    // libLiteRt.dylib + accelerators — litert-sys has `links = "LiteRt"` so
+    // its cargo:lib_dir becomes DEP_LITERT_LIB_DIR for direct dependents.
     println!("cargo:rerun-if-env-changed=DEP_LITERT_LIB_DIR");
-    for var in &["DEP_LITERTLM_LITERT_LIB_DIR", "DEP_LITERT_LIB_DIR"] {
-        if let Ok(dir) = std::env::var(var) {
-            println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
-        }
+    if let Ok(dir) = std::env::var("DEP_LITERT_LIB_DIR") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
+    }
+
+    // Legacy re-export names from litertlm (kept for back-compat).
+    println!("cargo:rerun-if-env-changed=DEP_LITERTLM_LITERT_LIB_DIR");
+    if let Ok(dir) = std::env::var("DEP_LITERTLM_LITERT_LIB_DIR") {
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{dir}");
     }
 }
 
