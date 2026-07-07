@@ -76,31 +76,14 @@ self.onmessage = async (event: MessageEvent) => {
           _wasmInitialised = true;
         }
 
-        const modelUrl = msg.modelUrl as string;
         const maxTokens = (msg.maxTokens as number | undefined) ?? 2048;
 
-        // Fetch the model file and pass it as a Blob so the engine can
-        // stream it into WASM memory without a second network round-trip.
-        post({ type: "load-progress", progress: 0 });
-        const response = await fetch(modelUrl);
-        if (!response.ok) throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}`);
-
-        const contentLength = Number(response.headers.get("content-length") ?? 0);
-        let loaded = 0;
-        const reader = response.body!.getReader();
-        const chunks: BlobPart[] = [];
-
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
-          loaded += value.byteLength;
-          if (contentLength > 0) {
-            post({ type: "load-progress", progress: Math.round((loaded / contentLength) * 90) });
-          }
-        }
-
-        const modelBlob = new Blob(chunks, { type: "application/octet-stream" });
+        // The model bytes are fetched in the main thread (where asset.localhost
+        // is accessible) and transferred here as an ArrayBuffer.
+        const modelBlob = new Blob(
+          [msg.modelBuffer as ArrayBuffer],
+          { type: "application/octet-stream" },
+        );
         post({ type: "load-progress", progress: 92 });
 
         if (conversation) { await conversation.delete().catch(() => {}); conversation = null; }
