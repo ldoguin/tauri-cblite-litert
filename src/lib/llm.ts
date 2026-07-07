@@ -182,8 +182,10 @@ export async function loadModels(
         modelId: LM_MODEL_ID,
         modelPath: config.lmModelPath,
         accelerator,
-        // contextLength 0 means "unknown" — omit so the library uses its compiled-in default.
-        maxTokens: caps.contextLength || undefined,
+        // contextLength 0 means "unknown" — use 4096 as a safe default rather
+        // than omitting (which lets the engine default to 2048, too small for
+        // most conversations).
+        maxTokens: caps.contextLength || 4096,
         vision: caps.supportsVision,
         cacheDir,
       });
@@ -255,7 +257,7 @@ export async function loadLmFromPath(
     modelId: LM_MODEL_ID,
     modelPath,
     accelerator,
-    maxTokens: caps.contextLength || undefined,
+    maxTokens: caps.contextLength || 4096,
     vision: caps.supportsVision,
     cacheDir,
   });
