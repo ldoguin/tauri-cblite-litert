@@ -258,6 +258,7 @@ export async function initDatabase(dbDir: string, ftsLanguage = "en"): Promise<v
   await runMigrations();
   await seedProductsIfEmpty();
   await seedDiseaseKbIfEmpty();
+  await seedAgentsIfEmpty();
 }
 
 export async function shutdownDatabase(): Promise<void> {
@@ -680,6 +681,79 @@ export async function deleteAgent(id: string): Promise<void> {
   if (!isTauri()) { webStore.delete(COL_AGENTS, id); return; }
   const { saveDocument } = await import("tauri-plugin-cblite");
   await saveDocument(COL_AGENTS, id, { __deleted: true });
+}
+
+// ── Agent seeding ──────────────────────────────────────────────────────────
+
+const DEFAULT_AGENTS: Omit<Agent, "id">[] = [
+  {
+    name: "General assistant",
+    description: "Helpful all-rounder with access to all offline tools",
+    systemPrompt: "You are a helpful assistant. Answer clearly and concisely. Use tools when they would help.",
+    toolIds: ["calculator", "date_time", "date_diff", "unit_converter", "text_stats", "base64", "json_query", "notes"],
+    isRouter: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    name: "Research assistant",
+    description: "Searches Wikipedia and the web, fetches URLs",
+    systemPrompt:
+      "You are a research assistant. Use wikipedia to look up facts, web_search to find current information, and fetch_url to read specific pages. Always cite your sources.",
+    toolIds: ["wikipedia", "web_search", "fetch_url", "date_time", "calculator"],
+    isRouter: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    name: "Data analyst",
+    description: "Maths, unit conversion, JSON queries, text stats",
+    systemPrompt:
+      "You are a data analyst assistant. Use calculator for arithmetic, unit_converter for conversions, json_query to extract data from JSON, and text_stats to analyse text. Show your working.",
+    toolIds: ["calculator", "unit_converter", "json_query", "text_stats", "date_diff", "date_time"],
+    isRouter: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    name: "News & markets",
+    description: "Hacker News headlines, weather, exchange rates",
+    systemPrompt:
+      "You are a news and markets assistant. Use hacker_news for tech news, weather for forecasts, and exchange_rates for currency conversions. Summarise clearly.",
+    toolIds: ["hacker_news", "weather", "exchange_rates", "date_time", "calculator"],
+    isRouter: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+  {
+    name: "PDF research",
+    description: "Reads and searches PDF documents in the knowledge base",
+    systemPrompt:
+      "You are a PDF research assistant. You have access to tools to list, read, and render PDF documents stored in the knowledge base.\n\n" +
+      "Workflow:\n" +
+      "1. Use list_knowledge_pdfs to discover available documents.\n" +
+      "2. Use knowledge_search to find relevant content — results include the document name and page number.\n" +
+      "3. Use get_pdf_page to read the full text of a specific page.\n" +
+      "4. Use view_pdf_page when the user wants to see a page — this renders it inline using pdf.js.\n\n" +
+      "Always cite the document name and page number when quoting or referencing content.",
+    toolIds: ["list_knowledge_pdfs", "get_pdf_page", "view_pdf_page", "knowledge_search"],
+    isRouter: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  },
+];
+
+async function seedAgentsIfEmpty(): Promise<void> {
+  try {
+    const existing = await listAgents();
+    if (existing.length > 0) return;
+    for (const agent of DEFAULT_AGENTS) {
+      const id = crypto.randomUUID();
+      await saveAgent({ id, ...agent });
+    }
+  } catch (e) {
+    console.warn("seedAgentsIfEmpty:", e);
+  }
 }
 
 // ── PDF records ────────────────────────────────────────────────────────────
