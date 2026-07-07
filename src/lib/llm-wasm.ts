@@ -66,11 +66,8 @@ export type WasmLoadProgress = (progress: number) => void;
 
 /**
  * Load a .litertlm model into the WASM engine.
- * modelUrl must be a URL accessible from the main thread (e.g. a Tauri asset
+ * modelUrl must be a URL accessible from the WebView (e.g. a Tauri asset
  * protocol URL or a local HTTP URL served by the dev server).
- *
- * The model is fetched in the main thread — blob: workers cannot reach
- * asset.localhost on Tauri — and the ArrayBuffer is transferred to the worker.
  */
 export async function loadWasmModel(
   modelUrl: string,
@@ -78,34 +75,6 @@ export async function loadWasmModel(
   onProgress?: WasmLoadProgress,
 ): Promise<void> {
   if (_loadedModelUrl === modelUrl && _workerReady) return;
-
-  // Fetch in the main thread where asset.localhost is accessible.
-  onProgress?.(0);
-  const response = await fetch(modelUrl);
-  if (!response.ok) throw new Error(`Failed to fetch model: ${response.status} ${response.statusText}`);
-
-  const contentLength = Number(response.headers.get("content-length") ?? 0);
-  let loaded = 0;
-  const reader = response.body!.getReader();
-  const chunks: Uint8Array[] = [];
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    loaded += value.byteLength;
-    if (contentLength > 0) {
-      // Reserve 0–90 % for the download; worker init gets 90–100 %.
-      onProgress?.(Math.round((loaded / contentLength) * 90));
-    }
-  }
-
-  // Concatenate into a single ArrayBuffer for zero-copy transfer.
-  const totalBytes = chunks.reduce((n, c) => n + c.byteLength, 0);
-  const buffer = new ArrayBuffer(totalBytes);
-  const view = new Uint8Array(buffer);
-  let offset = 0;
-  for (const chunk of chunks) { view.set(chunk, offset); offset += chunk.byteLength; }
 
   return new Promise((resolve, reject) => {
     const worker = getWorker();
@@ -131,8 +100,7 @@ export async function loadWasmModel(
     };
 
     worker.addEventListener("message", handler);
-    // Transfer the buffer — zero-copy, worker takes ownership.
-    worker.postMessage({ type: "load", modelBuffer: buffer, maxTokens }, [buffer]);
+    worker.postMessage({ type: "load", modelUrl, maxTokens });
   });
 }
 
