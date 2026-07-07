@@ -101,15 +101,20 @@ self.onmessage = async (event: MessageEvent) => {
           mainExecutorSettings: {
             maxNumTokens: maxTokens,
             advancedSettings: {
-              // Required fields with their defaults
               prefill_batch_sizes: [],
               num_output_candidates: 1,
               configure_magic_numbers: true,
               verify_magic_numbers: false,
               clear_kv_cache_before_prefill: true,
               num_logits_to_print_after_decode: 0,
+              gpu_madvise_original_shared_tensors: false,
               is_benchmark: false,
               preferred_device_substr: "",
+              num_threads_to_upload: 1,
+              num_threads_to_compile: 1,
+              convert_weights_on_gpu: false,
+              optimize_shader_compilation: false,
+              share_constant_tensors: false,
             },
           },
         });
