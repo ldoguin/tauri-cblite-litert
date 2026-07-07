@@ -1077,8 +1077,9 @@ async function seedProductsIfEmpty(): Promise<void> {
   dispatchDbProgress("Fetching product catalog…");
   try {
     const res = await fetch("/products-seed.json");
-    if (!res.ok) {
-      dispatchDbProgress(`Product seed not found (HTTP ${res.status}) — skipping`);
+    // Tauri's webview returns 200 + index.html for unknown paths — detect by Content-Type.
+    if (!res.ok || (res.headers.get("content-type") ?? "").includes("text/html")) {
+      dispatchDbProgress("Product seed not found — skipping");
       return;
     }
     const seed = await res.json() as Product[];
@@ -1166,8 +1167,9 @@ async function seedDiseaseKbIfEmpty(): Promise<void> {
   dispatchDbProgress("Fetching disease knowledge base…");
   try {
     const res = await fetch("/disease-profiles.ndjson");
-    if (!res.ok) {
-      dispatchDbProgress(`Disease KB seed not found (HTTP ${res.status}) — skipping`);
+    // Tauri's webview returns 200 + index.html for unknown paths — detect by Content-Type.
+    if (!res.ok || (res.headers.get("content-type") ?? "").includes("text/html")) {
+      dispatchDbProgress("Disease KB seed not found — skipping");
       return;
     }
     const text = await res.text();
