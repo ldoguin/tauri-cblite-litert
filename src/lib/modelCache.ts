@@ -152,25 +152,14 @@ export const MODEL_CATALOGUE: ModelEntry[] = [
   },
   // ── LLMs (Windows — WASM engine via @litert-lm/core) ──
   // Windows uses the WASM engine because LiteRtLmC.dll is unavailable.
-  // Only -web.litertlm files work: they use GPU_ARTISAN streaming load.
-  // Standard .litertlm files (kTfLitePrefillDecode) require CPU+VFS which
-  // buffers the entire model in WASM memory and OOMs WebView2.
-  {
-    id: "gemma4-2b-windows",
-    label: "Gemma 4 2B (Windows WASM)",
-    description: "Gemma 4 E2B — ~2.5 GB, runs via WebAssembly on Windows (GPU_ARTISAN streaming)",
-    kind: "llm",
-    platform: "windows",
-    wasmStreaming: true,
-    url: "https://huggingface.co/litert-community/gemma-4-E2B-it-litert-lm/resolve/main/gemma-4-E2B-it-web.litertlm",
-    fileName: "gemma-4-E2B-it-web.litertlm",
-    sizeBytes: 2500 * 1024 * 1024,
-    capabilities: { contextLength: 8192, promptTemplate: "gemma" },
-  },
+  // Only kTfLitePrefillDecode models (standard .litertlm) work reliably:
+  // they use CPU+VFS load. GPU_ARTISAN (-web.litertlm) OOMs WebView2 because
+  // WebView2's WebGPU allocates maxBufferSize upfront (~4 GB on most adapters).
+  // Practical limit: ~600 MB (Qwen3-0.6B). Larger models exhaust WebView2 heap.
   {
     id: "qwen3-0.6b-windows",
-    label: "Qwen3 0.6B (Windows WASM)",
-    description: "Qwen3 0.6B — ~586 MB, runs via WebAssembly on Windows (CPU backend)",
+    label: "Qwen3 0.6B (Windows)",
+    description: "Qwen3 0.6B — ~586 MB, CPU inference via WebAssembly. Recommended for Windows.",
     kind: "llm",
     platform: "windows",
     wasmStreaming: false,

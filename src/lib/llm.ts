@@ -123,7 +123,7 @@ export async function loadModels(
         const { convertFileSrc } = await import("@tauri-apps/api/core");
         const modelUrl = convertFileSrc(config.lmModelPath);
         const caps = resolveModelCapabilities(config.lmModelPath, platform, scanned);
-        await loadWasmModel(modelUrl, caps.contextLength || 2048, undefined, isWebLitertlm(config.lmModelPath));
+        await loadWasmModel(modelUrl, caps.contextLength || 2048, undefined, false);
         setActiveLmModel(LM_MODEL_ID);
         setActiveContextLength(caps.contextLength || 4096);
       } catch (err) {
@@ -224,17 +224,13 @@ export async function loadLmFromPath(
   const caps = resolveModelCapabilities(modelPath, platform, opts?.scanned ?? []);
 
   // On Windows, LiteRtLmC.dll is not available — use the WASM engine instead.
+  // Always use CPU backend (streaming=false): GPU_ARTISAN allocates maxBufferSize
+  // upfront via WebGPU which OOMs WebView2 for any model > ~1 GB.
+  // Practical limit on Windows WASM is ~600 MB (Qwen3-0.6B).
   if (platform === "windows") {
-    if (!isWebLitertlm(modelPath)) {
-      console.warn(
-        "[llm] Windows WASM engine requires a -web.litertlm file. " +
-        "Standard .litertlm files (kTfLitePrefillDecode) use CPU+VFS which " +
-        "may OOM on large models. Use a -web.litertlm variant for best results.",
-      );
-    }
     const { convertFileSrc } = await import("@tauri-apps/api/core");
     const modelUrl = convertFileSrc(modelPath);
-    await loadWasmModel(modelUrl, caps.contextLength || 2048, undefined, isWebLitertlm(modelPath));
+    await loadWasmModel(modelUrl, caps.contextLength || 2048, undefined, false);
     setActiveLmModel(LM_MODEL_ID);
     setActiveContextLength(caps.contextLength || 4096);
     return;
