@@ -1088,6 +1088,7 @@ export default function App() {
             onLoadLlm={chat.loadLlmFromCache}
             onLoadEmbed={chat.loadEmbedFromCache}
             onClose={() => setModal(null)}
+            hfToken={chat.config?.hfToken || undefined}
           />
         </div>
       )}

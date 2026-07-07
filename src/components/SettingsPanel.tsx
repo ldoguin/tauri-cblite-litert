@@ -193,6 +193,29 @@ export function SettingsPanel({ config, onSave, onClose, embedded }: Props) {
               </>
             )}
 
+            <label className="field-label">
+              HuggingFace token <span className="field-optional">(optional)</span>
+            </label>
+            <input
+              className="field-input"
+              type="password"
+              placeholder="hf_…"
+              value={draft.hfToken ?? ""}
+              onChange={(e) => set("hfToken", e.target.value)}
+            />
+            <p className="hint">
+              Access token from{" "}
+              <a
+                href="https://huggingface.co/settings/tokens"
+                target="_blank"
+                rel="noreferrer"
+              >
+                huggingface.co/settings/tokens
+              </a>
+              . Speeds up downloads and unlocks gated models. Leave empty for
+              anonymous access.
+            </p>
+
             <label className="field-label">FTS language</label>
             <input
               className="field-input"

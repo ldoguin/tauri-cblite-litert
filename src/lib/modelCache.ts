@@ -551,6 +551,7 @@ export async function downloadModel(
   modelId: string,
   onProgress: (p: DownloadProgress) => void,
   signal?: AbortSignal,
+  hfToken?: string,
 ): Promise<string> {
   const entry = MODEL_CATALOGUE.find((m) => m.id === modelId);
   if (!entry) throw new Error(`Unknown model: ${modelId}`);
@@ -559,7 +560,7 @@ export async function downloadModel(
   cancelDownload(modelId);
 
   if (isTauri()) {
-    return downloadModelTauri(entry, onProgress, signal);
+    return downloadModelTauri(entry, onProgress, signal, hfToken);
   }
 
   // ── Web: Cache API path ───────────────────────────────────────────────────
@@ -567,8 +568,11 @@ export async function downloadModel(
   activeDownloads.set(modelId, controller);
   signal?.addEventListener("abort", () => controller.abort(), { once: true });
 
+  const fetchHeaders: Record<string, string> = {};
+  if (hfToken) fetchHeaders["Authorization"] = `Bearer ${hfToken}`;
+
   try {
-    const response = await fetch(entry.url, { signal: controller.signal });
+    const response = await fetch(entry.url, { signal: controller.signal, headers: fetchHeaders });
     if (!response.ok) throw new Error(`HTTP ${response.status} fetching ${entry.url}`);
 
     const contentLength = Number(response.headers.get("content-length") ?? entry.sizeBytes);
@@ -628,6 +632,7 @@ async function downloadModelTauri(
   entry: ModelEntry,
   onProgress: (p: DownloadProgress) => void,
   signal?: AbortSignal,
+  hfToken?: string,
 ): Promise<string> {
   const { invoke } = await import("@tauri-apps/api/core");
   const { listen } = await import("@tauri-apps/api/event");
@@ -656,6 +661,7 @@ async function downloadModelTauri(
       modelId: entry.id,
       url: entry.url,
       fileName: modelFileName(entry),
+      hfToken: hfToken || null,
     });
 
     const registry = loadRegistry();

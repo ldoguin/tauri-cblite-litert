@@ -199,6 +199,7 @@ async fn download_model(
     model_id: String,
     url: String,
     file_name: String,
+    hf_token: Option<String>,
 ) -> Result<String, String> {
     // Cancel any existing download for this model.
     let mut cancel_rx = {
@@ -228,9 +229,12 @@ async fn download_model(
         return Ok(dest.to_string_lossy().into_owned());
     }
 
-    let response = reqwest::get(&url)
-        .await
-        .map_err(|e| format!("fetch {url}: {e}"))?;
+    let client = reqwest::Client::new();
+    let mut req = client.get(&url);
+    if let Some(token) = &hf_token {
+        req = req.header("Authorization", format!("Bearer {token}"));
+    }
+    let response = req.send().await.map_err(|e| format!("fetch {url}: {e}"))?;
 
     if !response.status().is_success() {
         downloads.lock().remove(&model_id);

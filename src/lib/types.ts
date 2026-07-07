@@ -402,6 +402,11 @@ export interface ModelConfig {
    * https://huggingface.co/…/resolve/main/model.litertlm
    */
   wasmModelUrl: string;
+  /**
+   * HuggingFace access token (hf_…). Optional — speeds up downloads from
+   * gated repos and avoids rate-limiting on the HF CDN.
+   */
+  hfToken: string;
 }
 
 export const DEFAULT_MODEL_CONFIG: ModelConfig = {
@@ -427,6 +432,7 @@ export const DEFAULT_MODEL_CONFIG: ModelConfig = {
   searxngUrl: "",
   modelFolder: "",
   wasmModelUrl: "",
+  hfToken: "",
 };
 
 export interface Product {

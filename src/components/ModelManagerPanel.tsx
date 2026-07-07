@@ -48,6 +48,8 @@ interface Props {
   onLoadLlm: (url: string, modelId: string, onProgress?: (pct: number) => void) => Promise<void>;
   onLoadEmbed: (url: string, modelId: string) => Promise<void>;
   onClose: () => void;
+  /** HuggingFace access token — passed to download requests for gated/rate-limited repos. */
+  hfToken?: string;
 }
 
 const KIND_LABELS: Record<ModelKind, string> = {
@@ -64,6 +66,7 @@ export function ModelManagerPanel({
   onLoadLlm,
   onLoadEmbed,
   onClose,
+  hfToken,
 }: Props) {
   const [models, setModels] = useState<CachedModel[]>(() => getCachedModels());
   const [progress, setProgress] = useState<Record<string, DownloadProgress>>({});
@@ -107,6 +110,8 @@ export function ModelManagerPanel({
       await downloadModel(
         modelId,
         (p) => { if (isMountedRef.current) setProgress((prev) => ({ ...prev, [modelId]: p })); },
+        undefined,
+        hfToken || undefined,
       );
       const updated = await syncCacheRegistry();
       if (isMountedRef.current) setModels(updated);
