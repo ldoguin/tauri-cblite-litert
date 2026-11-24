@@ -25,7 +25,7 @@ serde_json = "1"
 [dependencies]
 tauri = { version = "2", features = [] }
 tauri-plugin-os = "2"
-tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "1f2b3bb3a85bb613b3c1127352b74a68b02806e5", features = ["native-cbl"] }
+tauri-plugin-cblite = { git = "https://github.com/ldoguin/tauri-plugin-cblite", rev = "523a7eceb06682445283cdd0ade7e0f4db3f7e75", features = ["native-cbl"] }
 tauri-plugin-litert = { git = "https://github.com/ldoguin/tauri-plugin-litert", rev = "a4e6184" }
 # Direct dep on litert-lm-sys so its DEP_LITERTLM_LIB_DIR is propagated to
 # our build.rs — needed to emit the correct macOS rpath for libLiteRtLmC.dylib.
